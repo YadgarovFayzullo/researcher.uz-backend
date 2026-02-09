@@ -1,5 +1,6 @@
 import asyncio
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker, DeclarativeBase
 from src.core.config import settings
 
@@ -28,12 +29,21 @@ class Base(DeclarativeBase):
 async def get_db():
     retries = 5
     for i in range(retries):
-        try:
-            async with AsyncSessionLocal() as session:
+        async with AsyncSessionLocal() as session:
+            try:
+                await session.execute(text("SELECT 1"))
+            except Exception:
+                await session.rollback()
+                if i < retries - 1:
+                    print(f"[DB] Connection failed ({i + 1}/{retries}), retrying...")
+                    await asyncio.sleep(3)
+                    continue
+                raise ConnectionError(
+                    "Cannot connect to the database after multiple retries"
+                )
+
+            try:
                 yield session
-            break
-        except Exception as e:
-            print(f"[DB] Connection failed ({i + 1}/{retries}), retrying...")
-            await asyncio.sleep(3)
-    else:
-        raise ConnectionError("Cannot connect to the database after multiple retries")
+            finally:
+                await session.close()
+        return
