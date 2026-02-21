@@ -12,6 +12,7 @@ engine = create_async_engine(
     SQLALCHEMY_DATABASE_URL,
     echo=False,
     future=True,
+    pool_pre_ping=True,
     connect_args={"ssl": False},
 )
 
@@ -28,22 +29,26 @@ class Base(DeclarativeBase):
 
 async def get_db():
     retries = 5
-    for i in range(retries):
-        async with AsyncSessionLocal() as session:
-            try:
-                await session.execute(text("SELECT 1"))
-            except Exception:
-                await session.rollback()
-                if i < retries - 1:
-                    print(f"[DB] Connection failed ({i + 1}/{retries}), retrying...")
-                    await asyncio.sleep(3)
-                    continue
-                raise ConnectionError(
-                    "Cannot connect to the database after multiple retries"
-                )
+    session: AsyncSession | None = None
 
-            try:
-                yield session
-            finally:
-                await session.close()
-        return
+    for i in range(retries):
+        session = AsyncSessionLocal()
+        try:
+            await session.execute(text("SELECT 1"))
+            break
+        except Exception:
+            await session.rollback()
+            await session.close()
+            if i < retries - 1:
+                print(f"[DB] Connection failed ({i + 1}/{retries}), retrying...")
+                await asyncio.sleep(3)
+                continue
+            raise ConnectionError("Cannot connect to the database after multiple retries")
+
+    if session is None:
+        raise ConnectionError("Cannot initialize database session")
+
+    try:
+        yield session
+    finally:
+        await session.close()
