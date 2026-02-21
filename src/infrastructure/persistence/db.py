@@ -46,10 +46,10 @@ async def get_db():
                 print(f"[DB] Connection failed ({i + 1}/{retries}), retrying...")
                 await asyncio.sleep(3)
                 continue
-            raise DatabaseUnavailableError("Cannot connect to the database after multiple retries")
+            raise ConnectionError("Cannot connect to the database after multiple retries")
 
     if session is None:
-        raise DatabaseUnavailableError("Cannot initialize database session")
+        raise ConnectionError("Cannot initialize database session")
 
     try:
         yield session
