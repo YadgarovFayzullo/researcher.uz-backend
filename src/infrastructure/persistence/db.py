@@ -23,6 +23,9 @@ AsyncSessionLocal = sessionmaker(
 )
 
 
+class DatabaseUnavailableError(Exception):
+    """Raised when the application cannot establish a database connection."""
+
 class Base(DeclarativeBase):
     pass
 
