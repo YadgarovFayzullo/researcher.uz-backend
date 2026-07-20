@@ -25,8 +25,8 @@ MAX_LIMIT = 200
 async def list_articles(
     db: AsyncSession = Depends(get_db),
     issue_id: list[int] | None = Query(None),
-    journal_id: int | None = Query(
-        None, description="Все статьи журнала (через его выпуски)"
+    journal_id: list[int] | None = Query(
+        None, description="Все статьи журнала(ов) через их выпуски"
     ),
     publisher_id: int | None = Query(None),
     admin_id: str | None = Query(None),
