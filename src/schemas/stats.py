@@ -3,6 +3,21 @@ from datetime import datetime
 from uuid import UUID
 
 
+class ArticleIdsRequest(BaseModel):
+    article_ids: list[int] = []
+
+
+class JournalIdsRequest(BaseModel):
+    journal_ids: list[int] = []
+    days_back: int = 30
+
+
+class AddInteractionRequest(BaseModel):
+    article_id: int
+    ip_address: str | None = None
+    interaction_type: str  # view | download | like | dislike
+
+
 class ArticleStatsResponse(BaseModel):
     """Агрегированная статистика статьи"""
     article_id: int

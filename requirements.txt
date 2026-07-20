@@ -5,5 +5,11 @@ asyncpg
 pydantic-settings
 psycopg2-binary
 alembic
+pgvector
 python-dotenv
 python-slugify
+pyjwt
+bcrypt
+httpx
+boto3
+python-multipart

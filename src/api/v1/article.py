@@ -1,11 +1,18 @@
-from fastapi import Depends, APIRouter, HTTPException
+from fastapi import Depends, APIRouter, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from src.schemas.article import ArticleCreate, ArticleUpdate
+from src.api.deps import get_current_profile
+from src.domain.authz import can_write_article
 from src.infrastructure.persistence.db import get_db
+from src.infrastructure.persistence.models import Profile
+from src.schemas.article import ArticleCreate, ArticleUpdate
 from src.domain.article import ArticleDomain
 
 router = APIRouter()
 domain = ArticleDomain()
+
+
+def _forbidden() -> HTTPException:
+    return HTTPException(status.HTTP_403_FORBIDDEN, "Not allowed to write this article")
 
 
 @router.get("/{slug}")
@@ -17,17 +24,48 @@ async def get_article(slug: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/", status_code=201)
-async def create_article(article_in: ArticleCreate, db: AsyncSession = Depends(get_db)):
+async def create_article(
+    article_in: ArticleCreate,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(get_current_profile),
+):
+    # Авторизация по полям создаваемой строки (rls_content.sql: articles insert).
+    allowed = await can_write_article(
+        db,
+        role=profile.role,
+        user_id=profile.id,
+        issue_id=article_in.issue_id,
+        admin_id=getattr(article_in, "admin_id", None),
+        publisher_id=getattr(article_in, "publisher_id", None),
+    )
+    if not allowed:
+        raise _forbidden()
     article = await domain.create_article(db, article_in)
-    return {
-        "status": "created",
-        "slug": article.slug,
-        "article": article
-    }
+    return {"status": "created", "slug": article.slug, "article": article}
 
 
 @router.patch("/{id}")
-async def update_article(id: int, article_in: ArticleUpdate, db: AsyncSession = Depends(get_db)):
+async def update_article(
+    id: int,
+    article_in: ArticleUpdate,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(get_current_profile),
+):
+    existing = await domain.get_article_by_id(db, id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Article not found")
+    # Право на существующую строку (RLS `using`). ArticleUpdate не меняет
+    # issue_id/admin_id/publisher_id, поэтому `with check` == `using`.
+    allowed = await can_write_article(
+        db,
+        role=profile.role,
+        user_id=profile.id,
+        issue_id=existing.issue_id,
+        admin_id=existing.admin_id,
+        publisher_id=existing.publisher_id,
+    )
+    if not allowed:
+        raise _forbidden()
     article = await domain.update_article(db, id, article_in)
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
@@ -35,7 +73,24 @@ async def update_article(id: int, article_in: ArticleUpdate, db: AsyncSession = 
 
 
 @router.delete("/{id}")
-async def delete_article(id: int, db: AsyncSession = Depends(get_db)):
+async def delete_article(
+    id: int,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(get_current_profile),
+):
+    existing = await domain.get_article_by_id(db, id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Article not found")
+    allowed = await can_write_article(
+        db,
+        role=profile.role,
+        user_id=profile.id,
+        issue_id=existing.issue_id,
+        admin_id=existing.admin_id,
+        publisher_id=existing.publisher_id,
+    )
+    if not allowed:
+        raise _forbidden()
     deleted = await domain.delete_article(db, id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Article not found")

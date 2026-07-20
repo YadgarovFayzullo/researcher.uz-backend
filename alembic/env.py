@@ -11,6 +11,16 @@ from alembic import context
 # access to the values within the .ini file in use.
 config = context.config
 
+# URL берём из настроек приложения (DATABASE_URL), а не из хардкода в alembic.ini:
+# иначе миграции всегда шли бы в localhost из .ini, а в проде нужна прод-БД.
+# Драйвер приводим к asyncpg — так же, как это делает db.py для async-движка.
+from src.core.config import settings  # noqa: E402
+
+config.set_main_option(
+    "sqlalchemy.url",
+    settings.DATABASE_URL.replace("postgresql+psycopg2://", "postgresql+asyncpg://"),
+)
+
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
 if config.config_file_name is not None:
@@ -19,7 +29,7 @@ if config.config_file_name is not None:
 # add your model's MetaData object here
 # for 'autogenerate' support
 from src.infrastructure.persistence.db import Base  # noqa: E402
-from src.infrastructure.persistence.models import Journal, Issue, Article, ArticleInteraction  # noqa: E402
+import src.infrastructure.persistence.models  # noqa: E402,F401  (регистрирует все модели на Base.metadata)
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,

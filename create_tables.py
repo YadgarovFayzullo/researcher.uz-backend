@@ -1,6 +1,6 @@
 import asyncio
 from src.infrastructure.persistence.db import engine, Base
-from src.infrastructure.persistence.models import Article, Journal
+import src.infrastructure.persistence.models  # noqa: F401  (регистрирует все модели на Base.metadata)
 
 async def create_tables():
     print("Connecting to database to recreate tables...")
