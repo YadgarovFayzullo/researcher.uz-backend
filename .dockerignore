@@ -1,0 +1,29 @@
+# Секреты — НИКОГДА в образ (иначе запекутся в слой)
+.env
+.env.*
+
+# Окружения и кеши
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# VCS и метаданные
+.git
+.gitignore
+.dockerignore
+
+# Не нужно в рантайме
+tests
+*.md
+test_out.txt
+scratchpad
+.DS_Store
+
+# Локальный dev-стек БД (в проде своя Postgres)
+docker-compose.yml
