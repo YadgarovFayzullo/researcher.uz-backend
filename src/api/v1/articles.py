@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +23,7 @@ MAX_LIMIT = 200
 
 @router.get("/", response_model=ArticleListResponse)
 async def list_articles(
+    response: Response,
     db: AsyncSession = Depends(get_db),
     issue_id: list[int] | None = Query(None),
     journal_id: list[int] | None = Query(
@@ -32,7 +33,7 @@ async def list_articles(
     admin_id: str | None = Query(None),
     section_id: int | None = Query(None),
     publication_type: list[str] | None = Query(None),
-    field_of_science: str | None = Query(None),
+    field_of_science: list[str] | None = Query(None),
     published: bool | None = Query(None),
     has_doi: bool | None = Query(None),
     created_after: datetime | None = Query(
@@ -40,6 +41,9 @@ async def list_articles(
     ),
     has_issue: bool | None = Query(
         None, description="true — только статьи выпусков, false — только самостоятельные издания"
+    ),
+    q: str | None = Query(
+        None, description="подстрочный поиск по названию (обе локали) и автору"
     ),
     order_by: str = Query("created_at"),
     descending: bool = Query(True),
@@ -60,11 +64,17 @@ async def list_articles(
         has_doi=has_doi,
         has_issue=has_issue,
         created_after=created_after,
+        q=q,
         order_by=order_by,
         descending=descending,
         limit=limit,
         offset=offset,
         with_stats=with_stats,
+    )
+    # Публичное чтение — разрешаем кэш. s-maxage для edge/CDN (если появится),
+    # stale-while-revalidate чтобы отдавать мгновенно, обновляя в фоне.
+    response.headers["Cache-Control"] = (
+        "public, max-age=30, s-maxage=120, stale-while-revalidate=300"
     )
     return {"items": items, "total": total}
 
@@ -78,7 +88,7 @@ async def count_articles(
     admin_id: str | None = Query(None),
     section_id: int | None = Query(None),
     publication_type: list[str] | None = Query(None),
-    field_of_science: str | None = Query(None),
+    field_of_science: list[str] | None = Query(None),
     published: bool | None = Query(None),
     has_doi: bool | None = Query(None),
     created_after: datetime | None = Query(
@@ -87,6 +97,7 @@ async def count_articles(
     has_issue: bool | None = Query(
         None, description="true — только статьи выпусков, false — только самостоятельные издания"
     ),
+    q: str | None = Query(None),
 ):
     """Только число — замена `select('*', {count:'exact', head:true})` фронта."""
     total = await domain.count_articles(
@@ -102,8 +113,20 @@ async def count_articles(
         has_doi=has_doi,
         has_issue=has_issue,
         created_after=created_after,
+        q=q,
     )
     return {"count": total}
+
+
+@router.get("/journal-facets")
+async def journal_facets(
+    journal_id: int = Query(..., description="журнал, для которого нужны фасеты"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Лёгкие агрегаты журнала одним запросом: все id статей (наукометрия),
+    счётчики по выпускам и направлениям, суммарные метрики. Позволяет странице
+    журнала не выкачивать все статьи ради сайдбара/шапки/цитирований."""
+    return await domain.journal_facets(db, journal_id)
 
 
 class LookupRequest(BaseModel):

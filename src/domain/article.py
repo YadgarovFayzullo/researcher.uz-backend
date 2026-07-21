@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Sequence
 
 from slugify import slugify
-from sqlalchemy import Select, case, func, or_, select
+from sqlalchemy import Integer, Select, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.serialization import HEAVY_ARTICLE_COLUMNS, row_to_dict
@@ -25,6 +25,8 @@ from src.schemas.article import ArticleCreate, ArticleUpdate
 # Вектор эмбеддинга наружу не отдаём и не тянем из БД: это сотни чисел на
 # строку, на списке в тысячу статей — мегабайты впустую.
 _HEAVY = HEAVY_ARTICLE_COLUMNS
+# Для списков дополнительно режем тяжёлый текст, который в каталогах не виден.
+_LIST_EXCLUDE = _HEAVY + ("annotation_foreign", "keywords_foreign")
 
 _SORTABLE = {
     "created_at": Article.created_at,
@@ -59,12 +61,25 @@ class ArticleDomain:
         admin_id: str | None,
         section_id: int | None,
         publication_type: Sequence[str] | None,
-        field_of_science: str | None,
+        field_of_science: Sequence[str] | None,
         published: bool | None,
         has_doi: bool | None,
         has_issue: bool | None,
         created_after: datetime | None,
+        q: str | None = None,
     ) -> Select[Any]:
+        if q:
+            # Подстрочный поиск каталога: название (обе локали) ИЛИ автор. Это не
+            # ранжированный полнотекст (для него есть /search), а фильтр «содержит»
+            # внутри уже суженной выборки (журнал/выпуск) — там строк немного.
+            like = f"%{q.strip()}%"
+            stmt = stmt.where(
+                or_(
+                    Article.title.ilike(like),
+                    Article.title_foreign.ilike(like),
+                    Article.authors.ilike(like),
+                )
+            )
         if issue_id:
             stmt = stmt.where(Article.issue_id.in_(issue_id))
         if journal_id:
@@ -84,8 +99,8 @@ class ArticleDomain:
             stmt = stmt.where(Article.section_id == section_id)
         if publication_type:
             stmt = stmt.where(Article.publication_type.in_(publication_type))
-        if field_of_science is not None:
-            stmt = stmt.where(Article.field_of_science == field_of_science)
+        if field_of_science:
+            stmt = stmt.where(Article.field_of_science.in_(field_of_science))
         if published is not None:
             stmt = stmt.where(Article.published.is_(published))
         if has_doi is not None:
@@ -112,11 +127,12 @@ class ArticleDomain:
         admin_id: str | None = None,
         section_id: int | None = None,
         publication_type: Sequence[str] | None = None,
-        field_of_science: str | None = None,
+        field_of_science: Sequence[str] | None = None,
         published: bool | None = None,
         has_doi: bool | None = None,
         has_issue: bool | None = None,
         created_after: datetime | None = None,
+        q: str | None = None,
         order_by: str = "created_at",
         descending: bool = True,
         limit: int | None = None,
@@ -140,6 +156,7 @@ class ArticleDomain:
             has_doi=has_doi,
             has_issue=has_issue,
             created_after=created_after,
+            q=q,
         )
 
         total = (
@@ -148,6 +165,13 @@ class ArticleDomain:
             )
         ).scalar_one()
 
+        views_expr = func.coalesce(
+            func.sum(case((ArticleInteraction.view == 1, 1), else_=0)), 0
+        )
+        downloads_expr = func.coalesce(
+            func.sum(case((ArticleInteraction.download == 1, 1), else_=0)), 0
+        )
+
         cols: list[Any] = [
             Article,
             Journal.name.label("journal_name"),
@@ -155,14 +179,7 @@ class ArticleDomain:
             Publisher.name.label("publisher_name"),
         ]
         if with_stats:
-            cols += [
-                func.coalesce(
-                    func.sum(case((ArticleInteraction.view == 1, 1), else_=0)), 0
-                ).label("views"),
-                func.coalesce(
-                    func.sum(case((ArticleInteraction.download == 1, 1), else_=0)), 0
-                ).label("downloads"),
-            ]
+            cols += [views_expr.label("views"), downloads_expr.label("downloads")]
 
         stmt = (
             select(*cols)
@@ -177,9 +194,21 @@ class ArticleDomain:
                 ArticleInteraction, ArticleInteraction.article_id == Article.id
             ).group_by(Article.id, Journal.name, Journal.slug, Publisher.name)
 
-        col = _SORTABLE.get(order_by, Article.created_at)
+        # Сортировка по популярности/скачиваниям возможна только когда посчитаны
+        # агрегаты (with_stats). "pages" — по первому числу диапазона ("12-20"→12);
+        # substring по regex даёт NULL, если ведущих цифр нет, и такие уезжают в
+        # конец. Остальные ключи — колонки статьи из _SORTABLE.
+        if order_by in ("views", "downloads") and with_stats:
+            sort_col = views_expr if order_by == "views" else downloads_expr
+        elif order_by == "pages":
+            # Первая группа цифр в строке страниц (" 235–240" → 235). Без якоря
+            # ^, т.к. значения бывают с ведущим пробелом/буквами; NULL (нет цифр)
+            # уезжает в конец. Паритет с клиентским firstPage().
+            sort_col = cast(func.substring(Article.pages, r"\d+"), Integer)
+        else:
+            sort_col = _SORTABLE.get(order_by, Article.created_at)
         stmt = stmt.order_by(
-            col.desc().nullslast() if descending else col.asc().nullsfirst(),
+            sort_col.desc().nullslast() if descending else sort_col.asc().nullsfirst(),
             Article.id.desc(),
         )
         if limit is not None:
@@ -190,7 +219,11 @@ class ArticleDomain:
         rows = (await db.execute(stmt)).all()
         items: list[dict[str, Any]] = []
         for row in rows:
-            data = row_to_dict(row.Article, Article, exclude=_HEAVY)
+            # В списках выкидываем иностранную аннотацию/ключевые слова: каталоги
+            # их не показывают, а annotation_foreign бывает до 4 КБ на строку —
+            # на журнале в ~2000 статей это мегабайты лишнего трафика. Полный
+            # текст статьи отдаёт деталка /article/<slug>, не этот эндпоинт.
+            data = row_to_dict(row.Article, Article, exclude=_LIST_EXCLUDE)
             data["journal_name"] = row.journal_name
             data["journal_slug"] = row.journal_slug
             data["publisher_name"] = row.publisher_name
@@ -203,6 +236,71 @@ class ArticleDomain:
     async def count_articles(self, db: AsyncSession, **filters: Any) -> int:
         stmt = self._apply_filters(select(func.count(Article.id)), **filters)
         return int((await db.execute(stmt)).scalar_one())
+
+    async def journal_facets(
+        self, db: AsyncSession, journal_id: int
+    ) -> dict[str, Any]:
+        """Лёгкие агрегаты журнала одним махом — вместо выкачки всех статей ради
+        сайдбара/шапки/наукометрии. Возвращает:
+
+        - article_ids  — ВСЕ id статей журнала (вход дашборда цитирований);
+        - issue_counts — {issue_id: число статей} для счётчиков дерева выпусков;
+        - field_counts — [{field, count}] для фасета направлений науки;
+        - total_views / total_downloads — суммарные метрики журнала (шапка).
+        """
+        issue_ids = select(Issue.id).where(Issue.journal_id == journal_id)
+
+        rows = (
+            await db.execute(
+                select(Article.id, Article.issue_id).where(
+                    Article.issue_id.in_(issue_ids)
+                )
+            )
+        ).all()
+        article_ids = [r.id for r in rows]
+        issue_counts: dict[int, int] = {}
+        for r in rows:
+            if r.issue_id is not None:
+                issue_counts[r.issue_id] = issue_counts.get(r.issue_id, 0) + 1
+
+        field_rows = (
+            await db.execute(
+                select(Article.field_of_science, func.count(Article.id))
+                .where(
+                    Article.issue_id.in_(issue_ids),
+                    Article.field_of_science.isnot(None),
+                )
+                .group_by(Article.field_of_science)
+                .order_by(func.count(Article.id).desc())
+            )
+        ).all()
+        field_counts = [{"field": f, "count": int(c)} for f, c in field_rows]
+
+        totals = (
+            await db.execute(
+                select(
+                    func.coalesce(
+                        func.sum(case((ArticleInteraction.view == 1, 1), else_=0)), 0
+                    ),
+                    func.coalesce(
+                        func.sum(
+                            case((ArticleInteraction.download == 1, 1), else_=0)
+                        ),
+                        0,
+                    ),
+                ).where(ArticleInteraction.article_id.in_(article_ids))
+                if article_ids
+                else select(func.cast(0, Integer), func.cast(0, Integer))
+            )
+        ).one()
+
+        return {
+            "article_ids": article_ids,
+            "issue_counts": issue_counts,
+            "field_counts": field_counts,
+            "total_views": int(totals[0]),
+            "total_downloads": int(totals[1]),
+        }
 
     async def fields_of_science(self, db: AsyncSession) -> list[dict[str, Any]]:
         """{field, count} — фасет для FieldsOfScienceSection. Считаем в БД, а не
