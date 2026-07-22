@@ -69,14 +69,38 @@ class StatsDomain:
 
     @staticmethod
     async def record_like(db: AsyncSession, article_id: int, ip_address: str) -> dict:
-        db.add(ArticleInteraction(article_id=article_id, ip_address=ip_address, like=1))
-        await db.commit()
+        # одна отметка на IP+статью — повторные лайки не накручивают счётчик
+        existing = (
+            await db.execute(
+                select(ArticleInteraction.id).where(
+                    ArticleInteraction.article_id == article_id,
+                    ArticleInteraction.ip_address == ip_address,
+                    ArticleInteraction.like == 1,
+                )
+            )
+        ).scalars().first()
+        if existing is None:
+            db.add(ArticleInteraction(article_id=article_id, ip_address=ip_address, like=1))
+            await db.commit()
         return await StatsDomain.get_article_stats(db, article_id)
 
     @staticmethod
     async def record_download(db: AsyncSession, article_id: int, ip_address: str) -> dict:
-        db.add(ArticleInteraction(article_id=article_id, ip_address=ip_address, download=1))
-        await db.commit()
+        # дедуп по IP+час, как у просмотров
+        one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        recent = (
+            await db.execute(
+                select(ArticleInteraction.id).where(
+                    ArticleInteraction.article_id == article_id,
+                    ArticleInteraction.ip_address == ip_address,
+                    ArticleInteraction.created_at > one_hour_ago,
+                    ArticleInteraction.download == 1,
+                )
+            )
+        ).scalars().first()
+        if recent is None:
+            db.add(ArticleInteraction(article_id=article_id, ip_address=ip_address, download=1))
+            await db.commit()
         return await StatsDomain.get_article_stats(db, article_id)
 
     # ===================== RPC-паритет (батч-агрегаты) =======================
@@ -403,7 +427,20 @@ class StatsDomain:
             await db.commit()
             return True
 
-        # download
+        # download — дедуп по IP+час (как view), иначе счётчик легко накрутить
+        one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+        recent = (
+            await db.execute(
+                select(ArticleInteraction.id).where(
+                    ArticleInteraction.article_id == article_id,
+                    ArticleInteraction.ip_address == ip_address,
+                    ArticleInteraction.created_at > one_hour_ago,
+                    ArticleInteraction.download == 1,
+                )
+            )
+        ).scalars().first()
+        if recent is not None:
+            return False
         db.add(
             ArticleInteraction(article_id=article_id, ip_address=ip_address, download=1)
         )

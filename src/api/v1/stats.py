@@ -58,8 +58,11 @@ async def daily_stats(body: JournalIdsRequest, db: AsyncSession = Depends(get_db
 async def add_interaction(
     body: AddInteractionRequest, request: Request, db: AsyncSession = Depends(get_db)
 ):
-    """add_interaction — view/download/like/dislike. IP из тела либо из запроса."""
-    ip = body.ip_address or (request.client.host if request.client else None)
+    """add_interaction — view/download/like/dislike. IP берём ТОЛЬКО из
+    соединения (за uvicorn --proxy-headers это реальный клиент). body.ip_address
+    намеренно игнорируем: иначе подстановка IP в теле обходит дедуп и накручивает
+    счётчики."""
+    ip = request.client.host if request.client else None
     ok = await domain.add_interaction(
         db,
         article_id=body.article_id,
