@@ -12,7 +12,7 @@ dislike), поэтому «views» = count(*) filter (where view = 1) (как в
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.persistence.models import (
@@ -29,6 +29,26 @@ _DL = func.coalesce(func.sum(case((ArticleInteraction.download == 1, 1), else_=0
 
 class StatsDomain:
     """Работа со статистикой статей через таблицу article_interactions"""
+
+    # --------------------------------------------------------------------- #
+    @staticmethod
+    async def _bump(
+        db: AsyncSession, article_id: int, *, views: int = 0, downloads: int = 0
+    ) -> None:
+        """Инкремент денормализованных счётчиков статьи В ТЕКУЩЕЙ транзакции.
+
+        Вызывать перед db.commit() рядом со вставкой взаимодействия — тогда лог и
+        счётчик обновляются атомарно и не расходятся.
+        """
+        vals: dict = {}
+        if views:
+            vals["views_count"] = Article.views_count + views
+        if downloads:
+            vals["downloads_count"] = Article.downloads_count + downloads
+        if vals:
+            await db.execute(
+                update(Article).where(Article.id == article_id).values(**vals)
+            )
 
     # ===================== существующие (single-article) =====================
     @staticmethod
@@ -64,6 +84,7 @@ class StatsDomain:
             return await StatsDomain.get_article_stats(db, article_id)
 
         db.add(ArticleInteraction(article_id=article_id, ip_address=ip_address, view=1))
+        await StatsDomain._bump(db, article_id, views=1)
         await db.commit()
         return await StatsDomain.get_article_stats(db, article_id)
 
@@ -100,6 +121,7 @@ class StatsDomain:
         ).scalars().first()
         if recent is None:
             db.add(ArticleInteraction(article_id=article_id, ip_address=ip_address, download=1))
+            await StatsDomain._bump(db, article_id, downloads=1)
             await db.commit()
         return await StatsDomain.get_article_stats(db, article_id)
 
@@ -116,17 +138,16 @@ class StatsDomain:
             return []
         rows = (
             await db.execute(
-                select(
-                    ArticleInteraction.article_id,
-                    _VIEW.label("views"),
-                    _DL.label("downloads"),
-                )
-                .where(ArticleInteraction.article_id.in_(article_ids))
-                .group_by(ArticleInteraction.article_id)
+                select(Article.id, Article.views_count, Article.downloads_count)
+                .where(Article.id.in_(article_ids))
             )
         ).all()
         return [
-            {"article_id": r.article_id, "views": int(r.views), "downloads": int(r.downloads)}
+            {
+                "article_id": r.id,
+                "views": int(r.views_count),
+                "downloads": int(r.downloads_count),
+            }
             for r in rows
         ]
 
@@ -140,11 +161,10 @@ class StatsDomain:
             await db.execute(
                 select(
                     Issue.journal_id.label("journal_id"),
-                    _VIEW.label("views"),
-                    _DL.label("downloads"),
+                    func.coalesce(func.sum(Article.views_count), 0).label("views"),
+                    func.coalesce(func.sum(Article.downloads_count), 0).label("downloads"),
                 )
-                .select_from(ArticleInteraction)
-                .join(Article, Article.id == ArticleInteraction.article_id)
+                .select_from(Article)
                 .join(Issue, Issue.id == Article.issue_id)
                 .where(Issue.journal_id.isnot(None))
                 .group_by(Issue.journal_id)
@@ -169,19 +189,18 @@ class StatsDomain:
         # `issue_id IN (select ... where journal_id = Journal.id)`: во втором
         # случае корреляция с Journal внутрь не пробрасывается, и каждый журнал
         # получает итог по всей платформе.
-        def _interactions(flag) -> Any:
+        def _sum(col) -> Any:
             return (
-                select(func.count(ArticleInteraction.id))
-                .select_from(ArticleInteraction)
-                .join(Article, Article.id == ArticleInteraction.article_id)
+                select(func.coalesce(func.sum(col), 0))
+                .select_from(Article)
                 .join(Issue, Issue.id == Article.issue_id)
-                .where(Issue.journal_id == Journal.id, flag == 1)
+                .where(Issue.journal_id == Journal.id)
                 .correlate(Journal)
                 .scalar_subquery()
             )
 
-        views_sq = _interactions(ArticleInteraction.view)
-        downloads_sq = _interactions(ArticleInteraction.download)
+        views_sq = _sum(Article.views_count)
+        downloads_sq = _sum(Article.downloads_count)
         articles_sq = (
             select(func.count(Article.id))
             .select_from(Article)
@@ -223,7 +242,12 @@ class StatsDomain:
     async def get_platform_stats(db: AsyncSession) -> dict:
         """Порт get_platform_stats(): {totalViews, totalDownloads} по всей платформе."""
         row = (
-            await db.execute(select(_VIEW.label("v"), _DL.label("d")))
+            await db.execute(
+                select(
+                    func.coalesce(func.sum(Article.views_count), 0).label("v"),
+                    func.coalesce(func.sum(Article.downloads_count), 0).label("d"),
+                )
+            )
         ).one()
         return {"totalViews": int(row.v), "totalDownloads": int(row.d)}
 
@@ -242,11 +266,10 @@ class StatsDomain:
             await db.execute(
                 select(
                     Issue.journal_id.label("jid"),
-                    _VIEW.label("views"),
-                    _DL.label("downloads"),
+                    func.coalesce(func.sum(Article.views_count), 0).label("views"),
+                    func.coalesce(func.sum(Article.downloads_count), 0).label("downloads"),
                 )
-                .select_from(ArticleInteraction)
-                .join(Article, Article.id == ArticleInteraction.article_id)
+                .select_from(Article)
                 .join(Issue, Issue.id == Article.issue_id)
                 .where(Issue.journal_id.in_(journal_ids))
                 .group_by(Issue.journal_id)
@@ -370,6 +393,7 @@ class StatsDomain:
     async def increment_article_views(db: AsyncSession, article_id: int) -> None:
         """Порт increment_article_views(article_id): просто плюс один просмотр."""
         db.add(ArticleInteraction(article_id=article_id, view=1))
+        await StatsDomain._bump(db, article_id, views=1)
         await db.commit()
 
     @staticmethod
@@ -406,6 +430,7 @@ class StatsDomain:
             db.add(
                 ArticleInteraction(article_id=article_id, ip_address=ip_address, view=1)
             )
+            await StatsDomain._bump(db, article_id, views=1)
             await db.commit()
             return True
 
@@ -444,5 +469,6 @@ class StatsDomain:
         db.add(
             ArticleInteraction(article_id=article_id, ip_address=ip_address, download=1)
         )
+        await StatsDomain._bump(db, article_id, downloads=1)
         await db.commit()
         return True

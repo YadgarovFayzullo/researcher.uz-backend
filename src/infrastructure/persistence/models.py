@@ -343,6 +343,12 @@ class Article(Base):
 
     published = Column(Boolean, server_default=text("false"))
 
+    # Денормализованные счётчики (инкрементятся при вставке взаимодействия),
+    # чтобы горячие чтения статистики не агрегировали article_interactions.
+    # Источник истины — сам лог; эти колонки держатся в синхроне записью.
+    views_count = Column(Integer, nullable=False, server_default=text("0"))
+    downloads_count = Column(Integer, nullable=False, server_default=text("0"))
+
     # Семантический поиск (Фаза 7) — размерность в проде не задана, тип vector без dim
     embedding = Column(Vector(), nullable=True)
 

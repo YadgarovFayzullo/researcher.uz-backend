@@ -165,21 +165,16 @@ class ArticleDomain:
             )
         ).scalar_one()
 
-        views_expr = func.coalesce(
-            func.sum(case((ArticleInteraction.view == 1, 1), else_=0)), 0
-        )
-        downloads_expr = func.coalesce(
-            func.sum(case((ArticleInteraction.download == 1, 1), else_=0)), 0
-        )
-
+        # views/downloads берём из денормализованных колонок статьи — без join и
+        # group by по article_interactions. Прежний агрегат сканировал весь
+        # журнал независимо от LIMIT (аггрегация до лимита); теперь это обычные
+        # колонки, сортировка по ним доступна всегда.
         cols: list[Any] = [
             Article,
             Journal.name.label("journal_name"),
             Journal.slug.label("journal_slug"),
             Publisher.name.label("publisher_name"),
         ]
-        if with_stats:
-            cols += [views_expr.label("views"), downloads_expr.label("downloads")]
 
         stmt = (
             select(*cols)
@@ -189,17 +184,12 @@ class ArticleDomain:
         )
         stmt = self._apply_filters(stmt, **filters)
 
-        if with_stats:
-            stmt = stmt.outerjoin(
-                ArticleInteraction, ArticleInteraction.article_id == Article.id
-            ).group_by(Article.id, Journal.name, Journal.slug, Publisher.name)
-
-        # Сортировка по популярности/скачиваниям возможна только когда посчитаны
-        # агрегаты (with_stats). "pages" — по первому числу диапазона ("12-20"→12);
-        # substring по regex даёт NULL, если ведущих цифр нет, и такие уезжают в
-        # конец. Остальные ключи — колонки статьи из _SORTABLE.
-        if order_by in ("views", "downloads") and with_stats:
-            sort_col = views_expr if order_by == "views" else downloads_expr
+        # "pages" — по первому числу диапазона ("12-20"→12); substring по regex
+        # даёт NULL без ведущих цифр (уезжает в конец). Остальные — из _SORTABLE.
+        if order_by == "views":
+            sort_col = Article.views_count
+        elif order_by == "downloads":
+            sort_col = Article.downloads_count
         elif order_by == "pages":
             # Первая группа цифр в строке страниц (" 235–240" → 235). Без якоря
             # ^, т.к. значения бывают с ведущим пробелом/буквами; NULL (нет цифр)
@@ -228,8 +218,8 @@ class ArticleDomain:
             data["journal_slug"] = row.journal_slug
             data["publisher_name"] = row.publisher_name
             if with_stats:
-                data["views"] = int(row.views or 0)
-                data["downloads"] = int(row.downloads or 0)
+                data["views"] = int(row.Article.views_count or 0)
+                data["downloads"] = int(row.Article.downloads_count or 0)
             items.append(data)
         return items, int(total)
 
@@ -252,16 +242,23 @@ class ArticleDomain:
 
         rows = (
             await db.execute(
-                select(Article.id, Article.issue_id).where(
-                    Article.issue_id.in_(issue_ids)
-                )
+                select(
+                    Article.id,
+                    Article.issue_id,
+                    Article.views_count,
+                    Article.downloads_count,
+                ).where(Article.issue_id.in_(issue_ids))
             )
         ).all()
         article_ids = [r.id for r in rows]
         issue_counts: dict[int, int] = {}
+        total_views = 0
+        total_downloads = 0
         for r in rows:
             if r.issue_id is not None:
                 issue_counts[r.issue_id] = issue_counts.get(r.issue_id, 0) + 1
+            total_views += r.views_count or 0
+            total_downloads += r.downloads_count or 0
 
         field_rows = (
             await db.execute(
@@ -276,30 +273,14 @@ class ArticleDomain:
         ).all()
         field_counts = [{"field": f, "count": int(c)} for f, c in field_rows]
 
-        totals = (
-            await db.execute(
-                select(
-                    func.coalesce(
-                        func.sum(case((ArticleInteraction.view == 1, 1), else_=0)), 0
-                    ),
-                    func.coalesce(
-                        func.sum(
-                            case((ArticleInteraction.download == 1, 1), else_=0)
-                        ),
-                        0,
-                    ),
-                ).where(ArticleInteraction.article_id.in_(article_ids))
-                if article_ids
-                else select(func.cast(0, Integer), func.cast(0, Integer))
-            )
-        ).one()
-
+        # total_views/downloads суммируем из уже выбранных колонок статей —
+        # отдельного скана article_interactions больше нет.
         return {
             "article_ids": article_ids,
             "issue_counts": issue_counts,
             "field_counts": field_counts,
-            "total_views": int(totals[0]),
-            "total_downloads": int(totals[1]),
+            "total_views": int(total_views),
+            "total_downloads": int(total_downloads),
         }
 
     async def fields_of_science(self, db: AsyncSession) -> list[dict[str, Any]]:
