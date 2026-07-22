@@ -23,6 +23,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Identity,
+    Index,
     Integer,
     Numeric,
     String,
@@ -481,3 +482,46 @@ class ExternalCitation(Base):
     counts_by_year = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
     source = Column(Text, nullable=False, server_default=text("'openalex'::text"))
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+# ---------------------------------------------------------------------------
+# Новости платформы (standalone-модуль, не связан с иерархией контента)
+# ---------------------------------------------------------------------------
+
+class NewsPost(Base):
+    """Новость платформы. Пишет только owner; тело — HTML из Tiptap.
+
+    Единственный FK наружу — admin_id (автор). Модуль намеренно изолирован:
+    при росте раздела его можно выделить в отдельный сервис без распутывания
+    связей с контентной иерархией.
+    """
+
+    __tablename__ = "news"
+    __table_args__ = (
+        CheckConstraint(
+            "lang = ANY (ARRAY['ru'::text, 'uz'::text, 'en'::text])",
+            name="news_lang_check",
+        ),
+        CheckConstraint(
+            "status = ANY (ARRAY['draft'::text, 'published'::text])",
+            name="news_status_check",
+        ),
+        # Покрывает предикат публичной ленты:
+        # status='published' AND published_at <= now() ORDER BY published_at DESC.
+        Index("ix_news_feed", "status", "published_at"),
+    )
+
+    id = Column(BigInteger, Identity(always=True), primary_key=True)
+    title = Column(Text, nullable=False)
+    slug = Column(Text, nullable=False, unique=True, index=True)
+    excerpt = Column(Text, nullable=True)  # тизер для карточек и meta description
+    body_html = Column(Text, nullable=False, server_default=text("''::text"))
+    cover_image = Column(Text, nullable=True)  # публичный R2 URL
+    lang = Column(Text, nullable=False, server_default=text("'ru'::text"))
+    status = Column(Text, nullable=False, server_default=text("'draft'::text"))
+    # NULL у черновика; будущее значение = отложенная публикация.
+    published_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=True, onupdate=func.now())
+    admin_id = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=True)
+    meta = Column("metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb"))

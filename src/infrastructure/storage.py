@@ -17,7 +17,7 @@ from urllib.parse import quote, unquote, urlparse
 from src.core.config import settings
 
 # Известные бакеты Supabase → префиксы ключей в едином R2-бакете.
-KNOWN_PREFIXES = ("pdfs", "cover", "avatars")
+KNOWN_PREFIXES = ("pdfs", "cover", "avatars", "news")
 
 
 class StorageNotConfigured(RuntimeError):

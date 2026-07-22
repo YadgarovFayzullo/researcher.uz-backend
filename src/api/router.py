@@ -19,6 +19,7 @@ from src.api.v1 import (
     files,
     uploads,
     search,
+    news,
 )
 
 api_router = APIRouter()
@@ -57,3 +58,6 @@ api_router.include_router(uploads.router, prefix="/storage", tags=["storage"])
 
 # Поиск (Фаза 7)
 api_router.include_router(search.router, prefix="/search", tags=["search"])
+
+# Новости платформы
+api_router.include_router(news.router, prefix="/news", tags=["news"])
