@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import get_current_user
 from src.core.cookies import clear_auth_cookies, set_auth_cookies
+from src.core.ratelimit import limiter
 from src.core.security import create_access_token, create_refresh_token, decode_token
 from src.domain.auth import AuthDomain
 from src.infrastructure.persistence.db import get_db
@@ -29,8 +30,12 @@ def _issue(response: Response, user: User) -> TokenResponse:
 
 
 @router.post("/register", response_model=TokenResponse)
+@limiter.limit("5/minute")
 async def register(
-    body: RegisterRequest, response: Response, db: AsyncSession = Depends(get_db)
+    request: Request,
+    body: RegisterRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
 ):
     if await domain.get_user_by_email(db, body.email):
         raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
@@ -39,8 +44,12 @@ async def register(
 
 
 @router.post("/login", response_model=TokenResponse)
+@limiter.limit("10/minute")
 async def login(
-    body: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)
+    request: Request,
+    body: LoginRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
 ):
     user = await domain.authenticate(db, body.email, body.password)
     if not user:
@@ -49,6 +58,7 @@ async def login(
 
 
 @router.post("/refresh", response_model=TokenResponse)
+@limiter.limit("30/minute")
 async def refresh(
     request: Request, response: Response, db: AsyncSession = Depends(get_db)
 ):
