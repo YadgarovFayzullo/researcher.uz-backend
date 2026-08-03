@@ -47,17 +47,39 @@ async def serve_pdf(filename: str, request: Request, db: AsyncSession = Depends(
         "Content-Disposition": f'inline; filename="{safe_slug}.pdf"',
         "Cache-Control": _CACHE,
         "ETag": etag,
+        # Без Accept-Ranges pdf.js даже не пытается запрашивать куски и тянет
+        # файл целиком — на странице издателя это десятки мегабайт ради обложек.
+        "Accept-Ranges": "bytes",
     }
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
 
+    range_header = request.headers.get("range")
+
     try:
-        body, _ = await run_in_threadpool(storage.get, key)
+        body, _, content_range, total = await run_in_threadpool(
+            storage.get_range, key, range_header
+        )
     except StorageNotConfigured:
         return Response("Storage not configured", status_code=503)
     except KeyError:
         return Response("Not found", status_code=404)
+    except ValueError:
+        # Диапазон вне размера файла.
+        return Response(
+            "Range not satisfiable",
+            status_code=416,
+            headers={"Accept-Ranges": "bytes"},
+        )
     except Exception:
         return Response("Upstream error", status_code=502)
 
+    headers["Content-Length"] = str(len(body))
+
+    if content_range:
+        headers["Content-Range"] = content_range
+        return Response(content=body, status_code=206, headers=headers)
+
+    if total:
+        headers["Content-Length"] = str(total)
     return Response(content=body, status_code=200, headers=headers)

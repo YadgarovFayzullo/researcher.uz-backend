@@ -104,12 +104,48 @@ class Storage:
 
     def get(self, key: str) -> tuple[bytes, str]:
         """Вернуть (body, content_type). KeyError, если объекта нет."""
+        body, content_type, _, _ = self.get_range(key)
+        return body, content_type
+
+    def get_range(
+        self, key: str, range_header: str | None = None
+    ) -> tuple[bytes, str, str | None, int]:
+        """Вернуть (body, content_type, content_range, total_size).
+
+        `range_header` пробрасывается в R2 как есть — S3 сам разбирает
+        `bytes=0-1023`. Нужно для pdf.js: чтобы нарисовать обложку, ему хватает
+        первых страниц, и без частичных запросов он тянул бы файл целиком.
+        `content_range` не None только для частичного ответа (тогда 206).
+        """
         client = _client()
+        kwargs: dict[str, str] = {"Bucket": self.bucket, "Key": key}
+        if range_header:
+            kwargs["Range"] = range_header
         try:
-            obj = client.get_object(Bucket=self.bucket, Key=key)
+            obj = client.get_object(**kwargs)
         except client.exceptions.NoSuchKey as e:
             raise KeyError(key) from e
-        return obj["Body"].read(), obj.get("ContentType", "application/octet-stream")
+        except client.exceptions.ClientError as e:
+            # Недопустимый диапазон — отдаём наверх как ошибку значения,
+            # эндпоинт превратит её в 416.
+            if e.response.get("Error", {}).get("Code") == "InvalidRange":
+                raise ValueError("InvalidRange") from e
+            raise
+
+        content_range = obj.get("ContentRange")
+        # При частичном ответе ContentLength — длина куска, полный размер берём
+        # из хвоста ContentRange ("bytes 0-1023/1750000").
+        if content_range and "/" in content_range:
+            total = int(content_range.rsplit("/", 1)[1])
+        else:
+            total = int(obj.get("ContentLength", 0))
+
+        return (
+            obj["Body"].read(),
+            obj.get("ContentType", "application/octet-stream"),
+            content_range,
+            total,
+        )
 
     def delete(self, key: str) -> None:
         _client().delete_object(Bucket=self.bucket, Key=key)

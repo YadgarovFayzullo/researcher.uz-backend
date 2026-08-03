@@ -14,3 +14,7 @@ httpx
 boto3
 python-multipart
 slowapi
+# Рендер первой страницы PDF в обложку издания (src/infrastructure/covers.py).
+# pypdfium2 вместо PyMuPDF: Apache-2.0/BSD, без AGPL и без системного poppler.
+pypdfium2
+Pillow
