@@ -37,6 +37,20 @@ _SORTABLE = {
 }
 
 
+# Узбекская кириллица: python-slugify транслитерирует её по русским правилам
+# (Қ→k, Ў→u, Ҳ→kh), и «ҚАНДЛИ ЎЗГАРИШЛАРИ» превращалось в «kandli-uzgarishlari».
+# Подменяем эти буквы до slugify, чтобы получалось «qandli-ozgarishlari».
+# Апострофы у ў/ғ опускаем: в слуге они всё равно недопустимы.
+_UZ_CYRILLIC = str.maketrans(
+    {
+        "қ": "q", "Қ": "Q",
+        "ў": "o", "Ў": "O",
+        "ғ": "g", "Ғ": "G",
+        "ҳ": "h", "Ҳ": "H",
+    }
+)
+
+
 class ArticleDomain:
     def validate_publication(self, title: str) -> bool:
         return bool(title and len(title) > 5)
@@ -44,7 +58,7 @@ class ArticleDomain:
     def generate_slug(self, text: str) -> str:
         """Текст (в т.ч. кириллицу) → URL-friendly slug.
         'Древняя Греция' -> 'drevniaia-gretsiia'"""
-        return slugify(text)
+        return slugify((text or "").translate(_UZ_CYRILLIC))
 
     def get_current_time(self) -> datetime:
         return datetime.now(timezone.utc)
