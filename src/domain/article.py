@@ -50,6 +50,20 @@ _UZ_CYRILLIC = str.maketrans(
     }
 )
 
+# Часть букв читается по-разному в русском и узбекском: ж — «zh» против «j»,
+# х — «h» против «x», ё — «e» против «yo». Правила выбираем по самому тексту:
+# если встретилась узбекская буква, весь заголовок считаем узбекским. Русские
+# заголовки таких букв не содержат и транслитерируются как прежде.
+_UZ_MARKERS = frozenset("қўғҳҚЎҒҲ")
+
+_UZ_OVERRIDES = str.maketrans(
+    {
+        "ж": "j", "Ж": "J",
+        "х": "x", "Х": "X",
+        "ё": "yo", "Ё": "Yo",
+    }
+)
+
 
 class ArticleDomain:
     def validate_publication(self, title: str) -> bool:
@@ -57,8 +71,12 @@ class ArticleDomain:
 
     def generate_slug(self, text: str) -> str:
         """Текст (в т.ч. кириллицу) → URL-friendly slug.
-        'Древняя Греция' -> 'drevniaia-gretsiia'"""
-        return slugify((text or "").translate(_UZ_CYRILLIC))
+        'Древняя Греция' -> 'drevniaia-gretsiia'
+        'ҚАНДЛИ ЎЗГАРИШЛАРИ' -> 'qandli-ozgarishlari'"""
+        source = text or ""
+        if _UZ_MARKERS.intersection(source):
+            source = source.translate(_UZ_OVERRIDES)
+        return slugify(source.translate(_UZ_CYRILLIC))
 
     def get_current_time(self) -> datetime:
         return datetime.now(timezone.utc)
