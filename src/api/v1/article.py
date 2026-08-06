@@ -47,6 +47,18 @@ def _forbidden() -> HTTPException:
     return HTTPException(status.HTTP_403_FORBIDDEN, "Not allowed to write this article")
 
 
+@router.get("/resolve/{slug}")
+async def resolve_slug(slug: str, db: AsyncSession = Depends(get_db)):
+    """Актуальный слаг для старого адреса — для 301 со страницы статьи.
+
+    Двухсегментный путь с `/{slug}` не конфликтует: тот матчит один сегмент.
+    """
+    target = await domain.resolve_legacy_slug(db, slug)
+    if not target:
+        raise HTTPException(status_code=404, detail="No unambiguous match")
+    return {"slug": target}
+
+
 @router.get("/{slug}")
 async def get_article(slug: str, db: AsyncSession = Depends(get_db)):
     article = await domain.get_article_by_slug(db, slug)

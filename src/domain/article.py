@@ -355,6 +355,38 @@ class ArticleDomain:
         result = await db.execute(select(Article).where(Article.slug == slug))
         return result.scalars().first()
 
+    async def resolve_legacy_slug(
+        self, db: AsyncSession, slug: str
+    ) -> str | None:
+        """Старый слаг → актуальный, если он однозначно определяется.
+
+        Слаг устроен как «<из-заголовка>-<6 цифр>», где хвост — это время
+        создания. При переезде на свой бэкенд заголовочная часть сохранилась,
+        а хвост сгенерировался заново, и все проиндексированные адреса стали
+        404. Ищем статью с той же заголовочной частью.
+
+        Возвращаем результат ТОЛЬКО когда кандидат ровно один: заголовки в базе
+        повторяются (одна статья в разных выпусках), и увести читателя не на ту
+        статью хуже, чем честно отдать 404.
+        """
+        prefix, _, tail = slug.rpartition("-")
+        # Хвост должен быть похож на сгенерированный суффикс, иначе это
+        # обычный слаг, а не старый адрес.
+        if not prefix or not tail.isdigit():
+            return None
+
+        rows = (
+            await db.execute(
+                select(Article.slug)
+                .where(Article.slug.like(f"{prefix}-%"))
+                .limit(10)
+            )
+        ).scalars().all()
+
+        # LIKE «prefix-%» цепляет и более длинные слаги, поэтому сверяем точно.
+        exact = [s for s in rows if s.rpartition("-")[0] == prefix and s != slug]
+        return exact[0] if len(exact) == 1 else None
+
     async def get_article_by_id(self, db: AsyncSession, id: int) -> Article | None:
         result = await db.execute(select(Article).where(Article.id == id))
         return result.scalars().first()
