@@ -351,8 +351,16 @@ class ArticleDomain:
         )
         return [{"id": r.id, "title": r.title, "slug": r.slug} for r in res.all()]
 
-    async def get_article_by_slug(self, db: AsyncSession, slug: str) -> Article | None:
-        result = await db.execute(select(Article).where(Article.slug == slug))
+    async def get_article_by_slug(
+        self, db: AsyncSession, slug: str, *, published_only: bool = False
+    ) -> Article | None:
+        """Статья по слагу. `published_only` — для публичных путей: снятая с
+        публикации статья не должна открываться ни страницей, ни раздачей PDF.
+        Админка грузит статью по id, поэтому ей флаг не мешает."""
+        stmt = select(Article).where(Article.slug == slug)
+        if published_only:
+            stmt = stmt.where(Article.published.is_(True))
+        result = await db.execute(stmt)
         return result.scalars().first()
 
     async def resolve_legacy_slug(
@@ -379,6 +387,7 @@ class ArticleDomain:
             await db.execute(
                 select(Article.slug)
                 .where(Article.slug.like(f"{prefix}-%"))
+                .where(Article.published.is_(True))
                 .limit(10)
             )
         ).scalars().all()

@@ -35,7 +35,8 @@ async def serve_pdf(filename: str, request: Request, db: AsyncSession = Depends(
     slug = re.sub(r"\.pdf$", "", filename, flags=re.IGNORECASE)
     safe_slug = _SAFE_SLUG.sub("", slug)
 
-    article = await domain.get_article_by_slug(db, slug)
+    # Снятая с публикации статья не должна раздавать и PDF.
+    article = await domain.get_article_by_slug(db, slug, published_only=True)
     if not article or not article.pdf:
         return Response("Not found", status_code=404)
 

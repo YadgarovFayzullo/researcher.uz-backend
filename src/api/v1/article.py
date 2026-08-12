@@ -61,7 +61,10 @@ async def resolve_slug(slug: str, db: AsyncSession = Depends(get_db)):
 
 @router.get("/{slug}")
 async def get_article(slug: str, db: AsyncSession = Depends(get_db)):
-    article = await domain.get_article_by_slug(db, slug)
+    # published_only: снятая с публикации статья на сайте не открывается.
+    # Админка грузит её по id (/articles/by-id/{id}), поэтому редактирование
+    # снятой статьи по-прежнему работает.
+    article = await domain.get_article_by_slug(db, slug, published_only=True)
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
     return {"status": "ok", "article": article}
