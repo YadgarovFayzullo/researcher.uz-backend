@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     HUMAN_COOKIE_NAME: str = "human_pass"
     HUMAN_PASS_EXPIRE_HOURS: int = 12
 
+    # --- Статистика: чьи взаимодействия не считаем (см. src/core/bots.py) ---
+    # Сети ферм headless-браузеров, подставляющих UA обычного браузера. Через
+    # запятую; менять можно переменной окружения, без выкатки кода.
+    # 43.172.0.0/15 — Tencent Cloud Singapore, август 2026.
+    STATS_BLOCKED_NETWORKS: str = "43.172.0.0/15"
+
     # --- Cloudflare R2 (Storage, Фаза 6) — S3-совместимо ---
     R2_ACCOUNT_ID: str | None = None
     R2_ACCESS_KEY_ID: str | None = None

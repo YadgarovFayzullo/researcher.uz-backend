@@ -1,6 +1,7 @@
 from fastapi import Depends, APIRouter, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.infrastructure.persistence.db import get_db
+from src.core.bots import counts_as_human
 from src.domain.stats import StatsDomain
 from src.schemas.stats import (
     AddInteractionRequest,
@@ -61,7 +62,14 @@ async def add_interaction(
     """add_interaction — view/download/like/dislike. IP берём ТОЛЬКО из
     соединения (за uvicorn --proxy-headers это реальный клиент). body.ip_address
     намеренно игнорируем: иначе подстановка IP в теле обходит дедуп и накручивает
-    счётчики."""
+    счётчики.
+
+    Роботов не записываем (см. src/core/bots.py): просмотр засчитывается из
+    браузера, а краулеры исполняют JS — без фильтра статистика статей состоит из
+    них на три четверти."""
+    if not counts_as_human(request):
+        return {"ok": False}
+
     ip = request.client.host if request.client else None
     ok = await domain.add_interaction(
         db,
@@ -73,7 +81,11 @@ async def add_interaction(
 
 
 @router.post("/increment-views/{article_id}")
-async def increment_views(article_id: int, db: AsyncSession = Depends(get_db)):
+async def increment_views(
+    article_id: int, request: Request, db: AsyncSession = Depends(get_db)
+):
+    if not counts_as_human(request):
+        return {"ok": False}
     await domain.increment_article_views(db, article_id)
     return {"ok": True}
 
@@ -87,6 +99,9 @@ async def get_stats(article_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/record-view/{article_id}", response_model=ArticleStatsResponse)
 async def record_view(article_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    # Роботу отдаём текущие счётчики, но его просмотр не записываем.
+    if not counts_as_human(request):
+        return await domain.get_article_stats(db, article_id)
     ip = request.client.host if request.client else None
     return await domain.record_view(db, article_id, ip)
 
