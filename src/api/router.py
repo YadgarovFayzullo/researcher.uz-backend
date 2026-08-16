@@ -20,6 +20,7 @@ from src.api.v1 import (
     uploads,
     search,
     news,
+    security,
 )
 
 api_router = APIRouter()
@@ -61,3 +62,6 @@ api_router.include_router(search.router, prefix="/search", tags=["search"])
 
 # Новости платформы
 api_router.include_router(news.router, prefix="/news", tags=["news"])
+
+# Антибот: обмен токена Turnstile на cookie-пропуск
+api_router.include_router(security.router, prefix="/security", tags=["security"])

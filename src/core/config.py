@@ -45,6 +45,14 @@ class Settings(BaseSettings):
     # OpenAlex (цитирования) — ключ не нужен, mailto = polite pool
     OPENALEX_MAILTO: str = "info@researcher.uz"
 
+    # --- Cloudflare Turnstile (антибот) ---
+    # Пока секрет пуст, проверка выключена целиком (см. src/core/turnstile.py).
+    TURNSTILE_SECRET_KEY: str | None = None
+    # Cookie-«пропуск человека»: сколько живёт вердикт капчи, чтобы поиск не
+    # дёргал виджет на каждый запрос.
+    HUMAN_COOKIE_NAME: str = "human_pass"
+    HUMAN_PASS_EXPIRE_HOURS: int = 12
+
     # --- Cloudflare R2 (Storage, Фаза 6) — S3-совместимо ---
     R2_ACCOUNT_ID: str | None = None
     R2_ACCESS_KEY_ID: str | None = None

@@ -63,6 +63,14 @@ def create_refresh_token(user_id: str) -> str:
     )
 
 
+def create_human_token() -> str:
+    """«Пропуск человека» после Turnstile — без sub, он ничей и ничего не даёт,
+    кроме права дёргать публичные эндпоинты, закрытые от ботов."""
+    return _encode(
+        {}, timedelta(hours=settings.HUMAN_PASS_EXPIRE_HOURS), "human"
+    )
+
+
 def decode_token(token: str, expected_type: str | None = None) -> dict | None:
     """Проверяет подпись/срок; при expected_type сверяет тип. None — если невалиден."""
     try:
