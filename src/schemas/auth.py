@@ -15,6 +15,9 @@ class RegisterRequest(BaseModel):
     email: str
     password: str
     full_name: str | None = None
+    # Токен виджета Cloudflare Turnstile. Обязателен, только если на бэкенде
+    # задан TURNSTILE_SECRET_KEY (иначе поле игнорируется).
+    turnstile_token: str | None = None
 
 
 class TokenResponse(BaseModel):

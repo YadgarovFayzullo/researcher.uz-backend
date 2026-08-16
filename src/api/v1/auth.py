@@ -13,6 +13,7 @@ from src.api.deps import get_current_user
 from src.core.cookies import clear_auth_cookies, set_auth_cookies
 from src.core.ratelimit import limiter
 from src.core.security import create_access_token, create_refresh_token, decode_token
+from src.core.turnstile import client_ip, verify_token
 from src.domain.auth import AuthDomain
 from src.infrastructure.persistence.db import get_db
 from src.infrastructure.persistence.models import User
@@ -37,6 +38,13 @@ async def register(
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
+    # Регистрация — разовое действие, поэтому здесь нужен свежий токен виджета,
+    # а не cookie-пропуск (её бот получил бы один раз и штамповал аккаунты).
+    if not await verify_token(body.turnstile_token, client_ip(request)):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Не удалось подтвердить, что вы не робот. Обновите страницу и попробуйте снова.",
+        )
     if await domain.get_user_by_email(db, body.email):
         raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
     user = await domain.register(db, body.email, body.password, body.full_name)

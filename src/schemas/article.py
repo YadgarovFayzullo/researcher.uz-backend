@@ -5,7 +5,7 @@
 поэтому полей много и почти все опциональны.
 """
 import datetime
-from typing import Any, List, Union
+from typing import Any, List, Union, cast
 
 from pydantic import (
     AliasChoices,
@@ -32,12 +32,13 @@ def _list_to_string(v: Any) -> str | None:
     if v is None:
         return None
     if isinstance(v, list):
-        if not v:
+        items = cast("list[Any]", v)
+        if not items:
             return ""
         # Список авторов объектами {"name": "..."}
-        if isinstance(v[0], dict) and "name" in v[0]:
-            return ", ".join([str(item["name"]) for item in v])
-        return ", ".join([str(item) for item in v])
+        if isinstance(items[0], dict) and "name" in items[0]:
+            return ", ".join([str(item["name"]) for item in items])
+        return ", ".join([str(item) for item in items])
     return str(v)
 
 
@@ -53,12 +54,15 @@ class PublishMixin(BaseModel):
     published: bool = False
 
 
-class ArticleBase(BaseModel):
-    title: str
-    title_foreign: str | None = None
+class _ArticleCommon(BaseModel):
+    """Поля с одинаковыми типами во входных (Create) и выходных (Public) схемах.
 
-    # Принимаем либо список строк, либо список объектов, либо просто строку
-    authors: Union[List[Any], str, None] = None
+    `title`, `authors`, `keywords` сюда не входят: на входе это гибкие
+    union-типы, а в публичном ответе — строки из БД, и общее объявление
+    нарушало бы инвариантность типов при переопределении.
+    """
+
+    title_foreign: str | None = None
     pages: str | None = None
     doi: str | None = None
 
@@ -71,7 +75,6 @@ class ArticleBase(BaseModel):
     field_of_science: str | None = None
 
     # Принимаем список или строку
-    keywords: Union[List[str], str, None] = None
     keywords_foreign: Union[List[str], str, None] = None
 
     pdf: str | None = None
@@ -96,7 +99,19 @@ class ArticleBase(BaseModel):
         None, validation_alias=_META_IN, serialization_alias="metadata"
     )
 
-    _norm = field_validator(*_LIST_FIELDS, mode="before")(_list_to_string)
+    # check_fields=False: authors/keywords объявляются только в наследниках,
+    # там валидатор и сработает.
+    _norm = field_validator(*_LIST_FIELDS, mode="before", check_fields=False)(
+        _list_to_string
+    )
+
+
+class ArticleBase(_ArticleCommon):
+    title: str
+
+    # Принимаем либо список строк, либо список объектов, либо просто строку
+    authors: Union[List[Any], str, None] = None
+    keywords: Union[List[str], str, None] = None
 
 
 class ArticleCreate(ArticleBase):
@@ -151,7 +166,7 @@ class ArticleUpdate(BaseModel):
 
 class ArticlePublic(
     IDMixin,
-    ArticleBase,
+    _ArticleCommon,
     PublishMixin,
     TimestampMixin,
 ):

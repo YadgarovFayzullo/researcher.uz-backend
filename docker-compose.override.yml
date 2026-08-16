@@ -1,0 +1,8 @@
+# Dev-локальные оверрайды (docker compose подхватывает автоматически).
+# .env держит DATABASE_URL=@localhost (для скриптов, запускаемых НА хосте), но
+# внутри контейнера api хост БД — это сервис `db`, а не localhost. Переопределяем
+# только для контейнера.
+services:
+  api:
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/scientific_db
