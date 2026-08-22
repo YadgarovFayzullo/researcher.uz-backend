@@ -525,3 +525,90 @@ class NewsPost(Base):
     updated_at = Column(DateTime(timezone=True), nullable=True, onupdate=func.now())
     admin_id = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=True)
     meta = Column("metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+
+
+# ---------------------------------------------------------------------------
+# Импорт архивов с других платформ (import-integration.md)
+# ---------------------------------------------------------------------------
+
+class ImportJob(Base):
+    """Одна задача импорта: «залить архив в журнал X».
+
+    Импорт не пишет в articles напрямую — сначала строки источника попадают в
+    import_items, клиент смотрит превью и правит спорное, и только потом
+    задача применяется. Состояние живёт в БД, а не в памяти процесса: обработчик
+    крутится в BackgroundTasks и должен переживать рестарт контейнера.
+    """
+
+    __tablename__ = "import_jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "source_type = ANY (ARRAY['table'::text, 'oai'::text])",
+            name="import_jobs_source_type_check",
+        ),
+        CheckConstraint(
+            "status = ANY (ARRAY['draft'::text, 'parsing'::text, 'ready'::text, "
+            "'applying'::text, 'done'::text, 'failed'::text, 'cancelled'::text])",
+            name="import_jobs_status_check",
+        ),
+        Index("ix_import_jobs_journal", "journal_id", "created_at"),
+    )
+
+    id = Column(BigInteger, Identity(always=True), primary_key=True)
+    journal_id = Column(
+        BigInteger, ForeignKey("journals.id", ondelete="CASCADE"), nullable=False
+    )
+    created_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False)
+    source_type = Column(Text, nullable=False)
+    source_ref = Column(Text, nullable=True)  # имя файла или базовый URL источника
+    params = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    status = Column(Text, nullable=False, server_default=text("'draft'::text"))
+    totals = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    error = Column(Text, nullable=True)
+    # Отметка живости обработчика: задача в 'applying' с протухшим heartbeat —
+    # это оборванный прогон, его продолжают кнопкой, а не начинают заново.
+    heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+    items = relationship(
+        "ImportItem", back_populates="job", cascade="all, delete-orphan"
+    )
+
+
+class ImportItem(Base):
+    """Кандидат на импорт — одна строка таблицы или одна запись источника."""
+
+    __tablename__ = "import_items"
+    __table_args__ = (
+        CheckConstraint(
+            "status = ANY (ARRAY['pending'::text, 'duplicate'::text, 'invalid'::text, "
+            "'skipped'::text, 'created'::text, 'failed'::text])",
+            name="import_items_status_check",
+        ),
+        UniqueConstraint("job_id", "source_key", name="import_items_job_source_key"),
+        Index("ix_import_items_job_status", "job_id", "status"),
+    )
+
+    id = Column(BigInteger, Identity(always=True), primary_key=True)
+    job_id = Column(
+        BigInteger, ForeignKey("import_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    # Ключ записи в источнике: хеш строки таблицы или OAI-идентификатор. Держит
+    # уникальность внутри задачи — повторный разбор того же файла не двоит.
+    source_key = Column(Text, nullable=False)
+    raw = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    parsed = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    # 'год|том|номер' — по нему строки группируются в выпуски.
+    issue_key = Column(Text, nullable=True)
+    status = Column(Text, nullable=False, server_default=text("'pending'::text"))
+    problems = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    article_id = Column(
+        BigInteger, ForeignKey("articles.id", ondelete="SET NULL"), nullable=True
+    )
+    # Имя файла из таблицы, а после загрузки — публичный URL PDF в R2.
+    pdf_source = Column(Text, nullable=True)
+    pdf_url = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    job = relationship("ImportJob", back_populates="items")
