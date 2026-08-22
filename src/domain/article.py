@@ -9,6 +9,7 @@ from slugify import slugify
 from sqlalchemy import Integer, Select, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.domain.demo import article_is_not_demo
 from src.domain.serialization import HEAVY_ARTICLE_COLUMNS, row_to_dict
 from src.infrastructure.persistence.models import (
     Article,
@@ -147,6 +148,15 @@ class ArticleDomain:
             stmt = stmt.where(
                 Article.issue_id.isnot(None) if has_issue else Article.issue_id.is_(None)
             )
+        # Статьи демо-журнала (см. src/domain/demo.py) не всплывают в общих
+        # лентах и каталогах. Адресный запрос — по выпуску, журналу, секции,
+        # издательству или админу — не трогаем: это страница самого демо-журнала
+        # и админка клиента, там его статьи как раз и нужны.
+        addressed = any(
+            f not in (None, []) for f in (issue_id, journal_id, section_id, admin_id, publisher_id)
+        )
+        if not addressed:
+            stmt = stmt.where(article_is_not_demo())
         return stmt
 
     async def list_articles(

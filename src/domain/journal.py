@@ -4,6 +4,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from slugify import slugify
+from src.domain.demo import journal_is_not_demo
 from src.infrastructure.persistence.models import Issue, Journal
 from src.schemas.journal import JournalCreate, JournalPublic, JournalUpdate
 
@@ -20,6 +21,7 @@ class JournalDomain:
         *,
         type_: str | None = None,
         with_issue_counts: bool = False,
+        include_demo: bool = False,
     ) -> list[dict[str, Any]]:
         """Список журналов, по умолчанию — новые сверху.
 
@@ -27,6 +29,10 @@ class JournalDomain:
         /conferences показывает только вторые). `with_issue_counts` добавляет
         число выпусков коррелированным подзапросом, а не отдельным запросом на
         каждый журнал — счётчик нужен карточкам каталога.
+
+        `include_demo` возвращает и демонстрационные журналы (`metadata.demo`);
+        по умолчанию их не видно — это витрина, а демо предназначено клиенту по
+        прямой ссылке (см. `src/domain/demo.py`).
         """
         issue_count = (
             select(func.count(Issue.id))
@@ -40,6 +46,8 @@ class JournalDomain:
             stmt = stmt.add_columns(issue_count.label("issues_count"))
         if type_ is not None:
             stmt = stmt.where(Journal.type == type_)
+        if not include_demo:
+            stmt = stmt.where(journal_is_not_demo())
         stmt = stmt.order_by(Journal.created_at.desc().nullslast(), Journal.id.desc())
 
         rows = (await db.execute(stmt)).all()

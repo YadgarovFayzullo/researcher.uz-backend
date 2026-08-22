@@ -16,9 +16,16 @@ async def list_journals(
     with_issue_counts: bool = Query(
         False, description="добавить issues_count (число выпусков/томов)"
     ),
+    include_demo: bool = Query(
+        False,
+        description="показать и демо-журналы (metadata.demo) — нужно owner-консоли",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """Список журналов, новые сверху."""
     return await domain.list_journals(
-        db, type_=type, with_issue_counts=with_issue_counts
+        db,
+        type_=type,
+        with_issue_counts=with_issue_counts,
+        include_demo=include_demo,
     )

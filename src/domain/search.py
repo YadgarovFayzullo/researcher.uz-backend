@@ -36,6 +36,7 @@ _FTS_SQL = text(
     left join public.issues i on i.id = a.issue_id
     left join public.journals j on j.id = i.journal_id
     where a.published is true and a.search_vector @@ q.tsq
+      and coalesce(j.metadata->>'demo', 'false') <> 'true'
     order by rank desc, a.data desc nulls last
     limit :lim
     """
@@ -57,6 +58,7 @@ _TRGM_SQL = text(
     left join public.issues i on i.id = a.issue_id
     left join public.journals j on j.id = i.journal_id
     where a.published is true
+      and coalesce(j.metadata->>'demo', 'false') <> 'true'
       and (unaccent(:q) <% unaccent(coalesce(a.title,''))
            or unaccent(:q) <% unaccent(coalesce(a.title_foreign,'')))
     order by rank desc, a.data desc nulls last
@@ -82,6 +84,7 @@ _VECTOR_SQL = text(
     left join public.issues i on i.id = a.issue_id
     left join public.journals j on j.id = i.journal_id
     where a.published is true and a.embedding is not null
+      and coalesce(j.metadata->>'demo', 'false') <> 'true'
     order by a.embedding <=> cast(:vec as vector)
     limit :lim
     """
