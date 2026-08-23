@@ -25,7 +25,9 @@ class Settings(BaseSettings):
     # Origin'ы, которым разрешён CORS с credentials. Wildcard "*" здесь
     # невозможен: браузер не отправляет cookie на ответ с Allow-Origin: *,
     # а вся сессия у нас именно в httpOnly-cookie. Список через запятую.
-    CORS_ORIGINS: str = "http://localhost:3000"
+    # 3001 — потому что Next сам переезжает на него, когда 3000 занят другим
+    # проектом; без этого браузер режет запросы как cross-origin.
+    CORS_ORIGINS: str = "http://localhost:3000,http://localhost:3001"
 
     @property
     def cors_origins(self) -> list[str]:
