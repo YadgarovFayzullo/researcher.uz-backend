@@ -90,6 +90,29 @@ def base_url_from_site(raw: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, "/index.php/index/oai", "", "", ""))
 
 
+def set_hint_from_site(raw: str) -> str | None:
+    """Код журнала из ссылки, если клиент вставил её целиком.
+
+    `https://inlibrary.uz/index.php/cpis` и `.../index.php/cpis/issue/archive`
+    → `cpis`. Это подсказка для выбора журнала в списке, а не источник истины:
+    совпадение с реальным `setSpec` проверяется по ответу `ListSets`.
+    """
+    value = (raw or "").strip()
+    if not value:
+        return None
+    if not value.startswith(("http://", "https://")):
+        value = "https://" + value
+    parts = [p for p in urlparse(value).path.split("/") if p]
+    if "index.php" not in parts:
+        return None
+    tail = parts[parts.index("index.php") + 1 :]
+    if not tail:
+        return None
+    code = tail[0]
+    # `index` — служебный путь самого OJS, а не журнал.
+    return None if code in ("index", "oai") else code
+
+
 async def _request(base_url: str, params: dict[str, str]) -> ET.Element:
     url = f"{base_url}?{urlencode(params)}"
     try:

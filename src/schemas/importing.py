@@ -90,6 +90,8 @@ class OaiDiscoverResult(BaseModel):
     base_url: str
     repository_name: str
     sets: list[OaiSetPublic] = Field(default_factory=list)
+    # Журнал, угаданный из вставленной ссылки (если он есть среди sets).
+    suggested_set: str | None = None
 
 
 class OaiParseRequest(BaseModel):

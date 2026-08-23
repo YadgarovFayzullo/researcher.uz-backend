@@ -43,6 +43,7 @@ from src.infrastructure.external.oai import (
     base_url_from_site,
     identify,
     list_sets,
+    set_hint_from_site,
 )
 from src.infrastructure.external.safe_fetch import BlockedAddress, FetchError
 from src.infrastructure.persistence.db import AsyncSessionLocal, get_db
@@ -231,10 +232,15 @@ async def discover_repository(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     except FetchError as e:
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+    # Если клиент вставил ссылку на конкретный журнал, подставляем его в
+    # выборе — но только если такой сет действительно есть в репозитории.
+    hint = set_hint_from_site(body.site_url)
+    known = {s.spec for s in sets}
     return {
         "base_url": base_url,
         "repository_name": info.get("name", ""),
         "sets": [{"spec": s.spec, "name": s.name} for s in sets],
+        "suggested_set": hint if hint in known else None,
     }
 
 
