@@ -1,9 +1,9 @@
 """Импорт архивов с других платформ (`/import`).
 
-Всё под сессией и правами на журнал: задача привязана к `journal_id`, и каждая
-ручка проверяет право писать в этот журнал тем же `can_write_issue`, что и
-выпуски (owner или админ с записью в `journal_admins`). Чужую задачу не видно
-и не применить.
+Доступ — ТОЛЬКО владелец платформы: импорт продаётся как услуга, редактор
+журнала его не запускает. Поэтому здесь `require_owner`, а не привычный для
+выпусков `can_write_issue`; `journal_id` в задаче остаётся — он говорит, в
+какой журнал лить, но правом доступа больше не является.
 
 Применение идёт в BackgroundTasks: состояние живёт в БД (`import_jobs.status`,
 `heartbeat_at`), поэтому рестарт контейнера не теряет прогресс — задача
@@ -29,8 +29,7 @@ from fastapi.concurrency import run_in_threadpool
 from slugify import slugify
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import get_current_profile
-from src.domain.authz import can_write_issue
+from src.api.deps import require_owner
 from src.domain.importing import (
     ImportDomain,
     ImportError_,
@@ -47,7 +46,7 @@ from src.infrastructure.external.oai import (
 )
 from src.infrastructure.external.safe_fetch import BlockedAddress, FetchError
 from src.infrastructure.persistence.db import AsyncSessionLocal, get_db
-from src.infrastructure.persistence.models import ImportJob, Profile
+from src.infrastructure.persistence.models import ImportJob, Journal, Profile
 from src.infrastructure.storage import StorageNotConfigured, public_url, storage
 from src.schemas.importing import (
     ImportApplyRequest,
@@ -72,24 +71,20 @@ MAX_TABLE_BYTES = 15 * 1024 * 1024
 MAX_PDF_BYTES = 60 * 1024 * 1024
 
 
-def _forbidden() -> HTTPException:
-    return HTTPException(status.HTTP_403_FORBIDDEN, "Not allowed to import into this journal")
+async def _require_journal(db: AsyncSession, journal_id: int) -> None:
+    """Журнал должен существовать: импорт в несуществующий id — опечатка."""
+    exists = (
+        await db.execute(select(Journal.id).where(Journal.id == journal_id))
+    ).scalars().first()
+    if exists is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Журнал не найден")
 
 
-async def _guard_journal(db: AsyncSession, profile: Profile, journal_id: int) -> None:
-    if not await can_write_issue(
-        db, role=profile.role, user_id=profile.id, journal_id=journal_id
-    ):
-        raise _forbidden()
-
-
-async def _guarded_job(db: AsyncSession, profile: Profile, job_id: int) -> ImportJob:
+async def _get_job(db: AsyncSession, job_id: int) -> ImportJob:
     try:
-        job = await domain.get_job(db, job_id)
+        return await domain.get_job(db, job_id)
     except JobNotFound as e:
         raise HTTPException(status.HTTP_404_NOT_FOUND, str(e))
-    await _guard_journal(db, profile, job.journal_id)
-    return job
 
 
 # --------------------------------------------------------------------- шаблон
@@ -110,9 +105,9 @@ async def download_template():
 async def create_job(
     body: ImportJobCreate,
     db: AsyncSession = Depends(get_db),
-    profile: Profile = Depends(get_current_profile),
+    profile: Profile = Depends(require_owner),
 ):
-    await _guard_journal(db, profile, body.journal_id)
+    await _require_journal(db, body.journal_id)
     if body.source_type not in ("table", "oai"):
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "source_type должен быть 'table' или 'oai'"
@@ -136,9 +131,8 @@ async def create_job(
 async def list_jobs(
     journal_id: int = Query(...),
     db: AsyncSession = Depends(get_db),
-    profile: Profile = Depends(get_current_profile),
+    profile: Profile = Depends(require_owner),
 ):
-    await _guard_journal(db, profile, journal_id)
     return await domain.list_jobs(db, journal_id)
 
 
@@ -146,9 +140,9 @@ async def list_jobs(
 async def get_job(
     job_id: int,
     db: AsyncSession = Depends(get_db),
-    profile: Profile = Depends(get_current_profile),
+    profile: Profile = Depends(require_owner),
 ):
-    return await _guarded_job(db, profile, job_id)
+    return await _get_job(db, job_id)
 
 
 @router.post("/jobs/{job_id}/table", response_model=ImportParseResult)
@@ -156,10 +150,10 @@ async def upload_table(
     job_id: int,
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
-    profile: Profile = Depends(get_current_profile),
+    profile: Profile = Depends(require_owner),
 ):
     """Загрузить CSV/XLSX и разобрать его в кандидаты."""
-    job = await _guarded_job(db, profile, job_id)
+    job = await _get_job(db, job_id)
     content = await file.read()
     if len(content) > MAX_TABLE_BYTES:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Файл слишком большой")
@@ -179,7 +173,7 @@ async def upload_pdf(
     file: UploadFile = File(...),
     filename: str | None = Form(None),
     db: AsyncSession = Depends(get_db),
-    profile: Profile = Depends(get_current_profile),
+    profile: Profile = Depends(require_owner),
 ):
     """Загрузить один PDF и привязать его к строке по имени файла.
 
@@ -187,7 +181,7 @@ async def upload_pdf(
     оставляют шанса ZIP-у на триста статей, а пофайловая загрузка даёт прогресс
     и бесплатную докачку после разрыва.
     """
-    job = await _guarded_job(db, profile, job_id)
+    job = await _get_job(db, job_id)
     content = await file.read()
     if len(content) > MAX_PDF_BYTES:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Файл слишком большой")
@@ -213,7 +207,7 @@ async def upload_pdf(
 async def discover_repository(
     body: OaiDiscoverRequest,
     db: AsyncSession = Depends(get_db),
-    profile: Profile = Depends(get_current_profile),
+    profile: Profile = Depends(require_owner),
 ):
     """Что за сайт по этому адресу и какие журналы на нём есть.
 
@@ -221,7 +215,7 @@ async def discover_repository(
     который назвал пользователь, и открывать такой инструмент всем подряд не
     стоит даже с SSRF-фильтром.
     """
-    await _guard_journal(db, profile, body.journal_id)
+    await _require_journal(db, body.journal_id)
     try:
         base_url = base_url_from_site(body.site_url)
         info = await identify(base_url)
@@ -244,7 +238,7 @@ async def discover_repository(
     }
 
 
-async def _parse_oai_in_background(job_id: int) -> None:
+async def _parse_oai_in_background(job_id: int, resume: bool = False) -> None:
     """Обход репозитория в фоне — со своей сессией (сессия запроса уже закрыта).
 
     Разбор архива на тысячу статей идёт минуты: держать на нём HTTP-запрос
@@ -253,7 +247,7 @@ async def _parse_oai_in_background(job_id: int) -> None:
     async with AsyncSessionLocal() as db:
         job = await domain.get_job(db, job_id)
         try:
-            await domain.load_oai(db, job)
+            await domain.load_oai(db, job, resume=resume)
         except Exception as e:
             job.status = "failed"
             job.error = str(e)[:500]
@@ -266,14 +260,18 @@ async def start_oai_parse(
     body: OaiParseRequest,
     background: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
-    profile: Profile = Depends(get_current_profile),
+    profile: Profile = Depends(require_owner),
 ):
     """Запустить обход репозитория. Прогресс — обычным GET задачи."""
-    job = await _guarded_job(db, profile, job_id)
+    job = await _get_job(db, job_id)
     if job.status in ("parsing", "applying"):
         raise HTTPException(status.HTTP_409_CONFLICT, "Задача уже обрабатывается")
 
     params = dict(job.params or {})
+    if body.resume and not params.get("resume_token"):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Этот архив уже забран целиком — продолжать нечего"
+        )
     if body.set_spec:
         params["set"] = body.set_spec
     if body.date_from:
@@ -286,7 +284,7 @@ async def start_oai_parse(
     job.source_ref = params.get("base_url")
     await db.commit()
 
-    background.add_task(_parse_oai_in_background, job.id)
+    background.add_task(_parse_oai_in_background, job.id, body.resume)
     await db.refresh(job)
     return job
 
@@ -298,9 +296,9 @@ async def list_items(
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
-    profile: Profile = Depends(get_current_profile),
+    profile: Profile = Depends(require_owner),
 ):
-    await _guarded_job(db, profile, job_id)
+    await _get_job(db, job_id)
     items, total = await domain.items(
         db, job_id, status=item_status, limit=limit, offset=offset
     )
@@ -312,7 +310,7 @@ async def update_item(
     item_id: int,
     body: ImportItemUpdate,
     db: AsyncSession = Depends(get_db),
-    profile: Profile = Depends(get_current_profile),
+    profile: Profile = Depends(require_owner),
 ):
     """Правка кандидата до применения (или снятие галочки статусом skipped)."""
     from sqlalchemy import select
@@ -324,7 +322,6 @@ async def update_item(
     ).scalars().first()
     if item is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Строка импорта не найдена")
-    await _guarded_job(db, profile, item.job_id)
     try:
         return await domain.set_item(db, item_id, parsed=body.parsed, status=body.status)
     except ImportError_ as e:
@@ -335,10 +332,10 @@ async def update_item(
 async def revalidate(
     job_id: int,
     db: AsyncSession = Depends(get_db),
-    profile: Profile = Depends(get_current_profile),
+    profile: Profile = Depends(require_owner),
 ):
     """Пересчитать дубликаты и сводку (после правок или дозагрузки файлов)."""
-    job = await _guarded_job(db, profile, job_id)
+    job = await _get_job(db, job_id)
     await domain.revalidate(db, job)
     await db.refresh(job)
     return job
@@ -366,7 +363,7 @@ async def apply_job(
     body: ImportApplyRequest,
     background: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
-    profile: Profile = Depends(get_current_profile),
+    profile: Profile = Depends(require_owner),
 ):
     """Запустить импорт. Возвращает задачу сразу — прогресс опрашивается GET-ом.
 
@@ -374,7 +371,7 @@ async def apply_job(
     немного), без него — в фоне: архив на сотни статей не должен держать
     HTTP-запрос.
     """
-    job = await _guarded_job(db, profile, job_id)
+    job = await _get_job(db, job_id)
     if job.status == "applying" and not domain._is_stale(job):
         raise HTTPException(status.HTTP_409_CONFLICT, "Импорт уже идёт")
 
@@ -397,9 +394,9 @@ async def apply_job(
 async def cancel_job(
     job_id: int,
     db: AsyncSession = Depends(get_db),
-    profile: Profile = Depends(get_current_profile),
+    profile: Profile = Depends(require_owner),
 ):
-    job = await _guarded_job(db, profile, job_id)
+    job = await _get_job(db, job_id)
     await domain.cancel(db, job)
     await db.refresh(job)
     return job

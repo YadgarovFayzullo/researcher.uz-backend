@@ -40,8 +40,24 @@ MAX_RESPONSE_BYTES = 25 * 1024 * 1024
 MAX_PAGES = 60
 
 
+# Управляющие символы, запрещённые в XML 1.0 (кроме tab/LF/CR). В UTF-8 они
+# однобайтовые, а все байты многобайтовых последовательностей ≥ 0x80 — значит
+# такую чистку можно делать прямо по байтам, не разрушая кириллицу.
+_CONTROL_CHARS = re.compile(rb"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
 class OaiError(Exception):
     """Репозиторий ответил ошибкой или чем-то, что не разобрать."""
+
+
+def _error_context(content: bytes, error: ET.ParseError) -> str:
+    """Кусок ответа вокруг места ошибки — иначе диагностировать нечем."""
+    line, column = getattr(error, "position", (0, 0))
+    lines = content.split(b"\n")
+    if not (0 < line <= len(lines)):
+        return ""
+    fragment = lines[line - 1][max(0, column - 60) : column + 40]
+    return "Фрагмент: …" + fragment.decode("utf-8", "replace") + "…"
 
 
 @dataclass
@@ -122,11 +138,21 @@ async def _request(base_url: str, params: dict[str, str]) -> ET.Element:
 
     try:
         root = ET.fromstring(result.content)
-    except ET.ParseError as e:
-        raise OaiError(
-            f"Ответ {url} — не XML. Похоже, это не OAI-эндпоинт (получено "
-            f"{result.content_type or 'непонятно что'})."
-        ) from e
+    except ET.ParseError as first_error:
+        # Реальные архивы содержат символы, недопустимые в XML вообще: в
+        # universalpublishings.com попался сырой 0x02 посреди заголовка статьи
+        # (текст вставляли из Word). Такой ответ не спасёт ни один парсер, но
+        # терять из-за одного байта сотню статей нельзя — вычищаем и пробуем
+        # снова.
+        cleaned = _CONTROL_CHARS.sub(b"", result.content)
+        try:
+            root = ET.fromstring(cleaned)
+        except ET.ParseError:
+            raise OaiError(
+                f"Ответ {url} не удалось разобрать как XML "
+                f"(получено {result.content_type or 'непонятно что'}): {first_error}. "
+                f"{_error_context(result.content, first_error)}"
+            ) from first_error
 
     error = root.find("oai:error", NS)
     if error is not None:
@@ -179,6 +205,20 @@ def _resumption_token(container: ET.Element) -> str | None:
     return token or None
 
 
+@dataclass
+class RecordsPage:
+    """Порция записей и место, с которого можно продолжить.
+
+    Архивы бывают больше потолка одной задачи (у universalpublishings.com в
+    одном журнале 3940 статей при потолке 2000), поэтому обход прерывается и
+    возобновляется с сохранённого токена, а не начинается заново.
+    """
+
+    records: list[OaiRecord]
+    resume_token: str | None = None   # None — архив пройден до конца
+    total_in_repository: int | None = None
+
+
 async def list_records(
     base_url: str,
     *,
@@ -186,7 +226,8 @@ async def list_records(
     date_from: str | None = None,
     date_until: str | None = None,
     limit: int = 2000,
-) -> list[OaiRecord]:
+    resume_token: str | None = None,
+) -> RecordsPage:
     """Записи журнала. Удалённые пропускаем, служебные — тоже."""
     records: list[OaiRecord] = []
     params: dict[str, str] = {"verb": "ListRecords", "metadataPrefix": "oai_dc"}
@@ -197,7 +238,8 @@ async def list_records(
     if date_until:
         params["until"] = date_until
 
-    token: str | None = None
+    token: str | None = resume_token
+    total: int | None = None
     for _ in range(MAX_PAGES):
         # После первой страницы OAI требует ТОЛЬКО resumptionToken: verb с
         # набором параметров вместе с токеном репозиторий отвергает.
@@ -207,23 +249,34 @@ async def list_records(
         if container is None:
             break
 
-        for node in container.findall("oai:record", NS):
-            header = node.find("oai:header", NS)
+        node = container.find("oai:resumptionToken", NS)
+        if node is not None and node.get("completeListSize"):
+            try:
+                total = int(node.get("completeListSize", ""))
+            except ValueError:
+                total = None
+
+        for record_node in container.findall("oai:record", NS):
+            header = record_node.find("oai:header", NS)
             if header is not None and header.get("status") == "deleted":
                 continue
-            metadata = node.find("oai:metadata", NS)
+            metadata = record_node.find("oai:metadata", NS)
             if metadata is None:
                 continue
             record = _parse_record(header, metadata)
             if record is not None:
                 records.append(record)
-            if len(records) >= limit:
-                return records
 
         token = _resumption_token(container)
         if not token:
-            break
-    return records
+            return RecordsPage(records=records, resume_token=None, total_in_repository=total)
+        # Потолок проверяем МЕЖДУ страницами, а не внутри: оборвав страницу
+        # посередине, мы бы не знали, с какого места продолжать — токен
+        # указывает на границу страницы, а не на запись.
+        if len(records) >= limit:
+            return RecordsPage(records=records, resume_token=token, total_in_repository=total)
+
+    return RecordsPage(records=records, resume_token=token, total_in_repository=total)
 
 
 def _lang_of(node: ET.Element) -> str:

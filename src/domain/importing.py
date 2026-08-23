@@ -498,7 +498,9 @@ class ImportDomain:
         await self.revalidate(db, job)
         return {"parsed": len(items), "skipped_in_file": len(rows) - len(items), "unknown_columns": unknown_columns}
 
-    async def load_oai(self, db: AsyncSession, job: ImportJob) -> dict[str, Any]:
+    async def load_oai(
+        self, db: AsyncSession, job: ImportJob, *, resume: bool = False
+    ) -> dict[str, Any]:
         """Забрать записи со старого сайта и разложить их в кандидаты.
 
         Метаданные берём из OAI одним обходом. Landing page здесь НЕ трогаем:
@@ -513,31 +515,51 @@ class ImportDomain:
         if not base_url:
             raise ImportError_("В задаче не указан адрес репозитория")
 
+        # Продолжение обхода: архив бывает больше потолка задачи, и тогда
+        # клиент дозабирает хвост той же задачей, а не начинает заново.
+        resume_token = params.get("resume_token") if resume else None
+
         try:
-            records = await list_records(
+            page = await list_records(
                 base_url,
                 set_spec=params.get("set"),
                 date_from=params.get("from"),
                 date_until=params.get("until"),
                 limit=MAX_ITEMS_PER_JOB,
+                resume_token=resume_token,
             )
         except OaiError as e:
             raise ImportError_(str(e)) from e
 
-        if not records:
+        records = page.records
+        if not records and not resume:
             raise ImportError_(
                 "Репозиторий не отдал ни одной записи. Проверьте выбранный журнал "
                 "и диапазон дат."
             )
 
-        await db.execute(
-            ImportItem.__table__.delete().where(
-                ImportItem.job_id == job.id, ImportItem.status != "created"
+        if not resume:
+            await db.execute(
+                ImportItem.__table__.delete().where(
+                    ImportItem.job_id == job.id, ImportItem.status != "created"
+                )
             )
-        )
+            existing_keys: set[str] = set()
+        else:
+            # При догрузке прежние кандидаты остаются; ключи нужны, чтобы не
+            # налететь на UNIQUE (job_id, source_key) при пересечении страниц.
+            existing_keys = set(
+                (
+                    await db.execute(
+                        select(ImportItem.source_key).where(ImportItem.job_id == job.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
 
         items: list[ImportItem] = []
-        seen: set[str] = set()
+        seen: set[str] = set(existing_keys)
         for record in records:
             parsed, problems = parsed_from_oai(record)
             key = record.identifier or source_key_of({}, parsed)
@@ -567,10 +589,20 @@ class ImportDomain:
             )
 
         db.add_all(items)
+        # Токен продолжения храним в задаче: он и есть закладка в чужом архиве.
+        job.params = {
+            **params,
+            "resume_token": page.resume_token,
+            "total_in_repository": page.total_in_repository,
+        }
         job.status = "parsing"
         await db.commit()
         await self.revalidate(db, job)
-        return {"parsed": len(items), "skipped_in_file": len(records) - len(items), "unknown_columns": []}
+        return {
+            "parsed": len(items),
+            "skipped_in_file": len(records) - len(items),
+            "unknown_columns": [],
+        }
 
     async def revalidate(self, db: AsyncSession, job: ImportJob) -> None:
         """Пересчитать дубликаты и сводку. Дёшево — идёт после каждой правки."""

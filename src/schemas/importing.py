@@ -95,8 +95,13 @@ class OaiDiscoverResult(BaseModel):
 
 
 class OaiParseRequest(BaseModel):
-    """Что именно забирать: журнал (сет) и, по желанию, диапазон дат."""
+    """Что именно забирать: журнал (сет) и, по желанию, диапазон дат.
+
+    `resume` продолжает прерванный обход с сохранённой закладки: архив бывает
+    больше потолка задачи (2000 записей), и хвост дозабирается той же задачей.
+    """
 
     set_spec: str | None = None
     date_from: str | None = None   # YYYY-MM-DD
     date_until: str | None = None
+    resume: bool = False
