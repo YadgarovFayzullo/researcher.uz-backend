@@ -72,3 +72,29 @@ class ImportPdfResult(BaseModel):
     matched: bool
     item_id: int | None = None
     url: str
+
+
+class OaiDiscoverRequest(BaseModel):
+    """Разведка старого сайта: адрес вводит клиент, журнал — для проверки прав."""
+
+    journal_id: int
+    site_url: str
+
+
+class OaiSetPublic(BaseModel):
+    spec: str
+    name: str
+
+
+class OaiDiscoverResult(BaseModel):
+    base_url: str
+    repository_name: str
+    sets: list[OaiSetPublic] = Field(default_factory=list)
+
+
+class OaiParseRequest(BaseModel):
+    """Что именно забирать: журнал (сет) и, по желанию, диапазон дат."""
+
+    set_spec: str | None = None
+    date_from: str | None = None   # YYYY-MM-DD
+    date_until: str | None = None

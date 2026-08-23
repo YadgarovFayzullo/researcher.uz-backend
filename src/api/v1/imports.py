@@ -38,6 +38,13 @@ from src.domain.importing import (
     JobNotFound,
     template_csv,
 )
+from src.infrastructure.external.oai import (
+    OaiError,
+    base_url_from_site,
+    identify,
+    list_sets,
+)
+from src.infrastructure.external.safe_fetch import BlockedAddress, FetchError
 from src.infrastructure.persistence.db import AsyncSessionLocal, get_db
 from src.infrastructure.persistence.models import ImportJob, Profile
 from src.infrastructure.storage import StorageNotConfigured, public_url, storage
@@ -50,6 +57,9 @@ from src.schemas.importing import (
     ImportJobPublic,
     ImportParseResult,
     ImportPdfResult,
+    OaiDiscoverRequest,
+    OaiDiscoverResult,
+    OaiParseRequest,
 )
 
 router = APIRouter()
@@ -102,9 +112,14 @@ async def create_job(
     profile: Profile = Depends(get_current_profile),
 ):
     await _guard_journal(db, profile, body.journal_id)
-    if body.source_type != "table":
-        # Источник OAI придёт этапом 3 (import-integration.md).
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Пока поддерживается только source_type=table")
+    if body.source_type not in ("table", "oai"):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "source_type должен быть 'table' или 'oai'"
+        )
+    if body.source_type == "oai" and not (body.params or {}).get("base_url"):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Для импорта со старого сайта нужен params.base_url"
+        )
     job = await domain.create_job(
         db,
         journal_id=body.journal_id,
@@ -191,6 +206,83 @@ async def upload_pdf(
     url = public_url(key) or key
     item = await domain.attach_pdf(db, job, filename=original, url=url)
     return {"matched": item is not None, "item_id": item.id if item else None, "url": url}
+
+
+@router.post("/discover", response_model=OaiDiscoverResult)
+async def discover_repository(
+    body: OaiDiscoverRequest,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(get_current_profile),
+):
+    """Что за сайт по этому адресу и какие журналы на нём есть.
+
+    Под правами на журнал, а не под простой сессией: ручка ходит по адресу,
+    который назвал пользователь, и открывать такой инструмент всем подряд не
+    стоит даже с SSRF-фильтром.
+    """
+    await _guard_journal(db, profile, body.journal_id)
+    try:
+        base_url = base_url_from_site(body.site_url)
+        info = await identify(base_url)
+        sets = await list_sets(base_url)
+    except OaiError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    except BlockedAddress as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
+    except FetchError as e:
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(e))
+    return {
+        "base_url": base_url,
+        "repository_name": info.get("name", ""),
+        "sets": [{"spec": s.spec, "name": s.name} for s in sets],
+    }
+
+
+async def _parse_oai_in_background(job_id: int) -> None:
+    """Обход репозитория в фоне — со своей сессией (сессия запроса уже закрыта).
+
+    Разбор архива на тысячу статей идёт минуты: держать на нём HTTP-запрос
+    нельзя, а состояние и так живёт в задаче.
+    """
+    async with AsyncSessionLocal() as db:
+        job = await domain.get_job(db, job_id)
+        try:
+            await domain.load_oai(db, job)
+        except Exception as e:
+            job.status = "failed"
+            job.error = str(e)[:500]
+            await db.commit()
+
+
+@router.post("/jobs/{job_id}/oai", response_model=ImportJobPublic)
+async def start_oai_parse(
+    job_id: int,
+    body: OaiParseRequest,
+    background: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(get_current_profile),
+):
+    """Запустить обход репозитория. Прогресс — обычным GET задачи."""
+    job = await _guarded_job(db, profile, job_id)
+    if job.status in ("parsing", "applying"):
+        raise HTTPException(status.HTTP_409_CONFLICT, "Задача уже обрабатывается")
+
+    params = dict(job.params or {})
+    if body.set_spec:
+        params["set"] = body.set_spec
+    if body.date_from:
+        params["from"] = body.date_from
+    if body.date_until:
+        params["until"] = body.date_until
+    job.params = params
+    job.status = "parsing"
+    job.error = None
+    job.source_ref = params.get("base_url")
+    await db.commit()
+
+    background.add_task(_parse_oai_in_background, job.id)
+    await db.refresh(job)
+    return job
 
 
 @router.get("/jobs/{job_id}/items", response_model=ImportItemsPage)

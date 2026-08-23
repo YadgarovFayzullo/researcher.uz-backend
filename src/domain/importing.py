@@ -19,10 +19,15 @@ import csv
 import hashlib
 import io
 import re
+import time
 import unicodedata
 from datetime import date, datetime, timezone
-from typing import Any, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
+if TYPE_CHECKING:  # только для аннотаций — модуль тянет httpx, не нужный CSV-пути
+    from src.infrastructure.external.oai import OaiRecord
+
+from slugify import slugify
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -280,6 +285,87 @@ def build_parsed(row: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, st
     return parsed, problems
 
 
+def _pick_languages(values: dict[str, str], preferred: str | None) -> tuple[str | None, str | None]:
+    """Многоязычное поле OAI → пара «основной / иностранный».
+
+    Основным берём язык самой статьи (`dc:language`), а если его нет — первый
+    попавшийся. Иностранным — английский, если он не основной; иначе любой
+    оставшийся. Так узбекская статья с английским переводом ложится в наши
+    `title` / `title_foreign` тем же способом, что и при ручном вводе.
+    """
+    if not values:
+        return None, None
+
+    def by_prefix(prefix: str) -> str | None:
+        for lang, value in values.items():
+            if lang.split("-")[0] == prefix:
+                return value
+        return None
+
+    main_lang = (preferred or "").lower()[:2]
+    main = by_prefix(main_lang) if main_lang else None
+    if main is None:
+        main = next(iter(values.values()))
+
+    foreign = None
+    for candidate in ("en", "ru"):
+        value = by_prefix(candidate)
+        if value and value != main:
+            foreign = value
+            break
+    if foreign is None:
+        foreign = next((v for v in values.values() if v != main), None)
+    return main, foreign
+
+
+def parsed_from_oai(record: "OaiRecord") -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Запись OAI → поля статьи (без обращения к landing page)."""
+    from src.infrastructure.external.oai import parse_source
+
+    source = parse_source(record.source)
+    lang = (record.language or "").lower()
+    # `dc:language` бывает трёхбуквенным (`rus`, `uzb`) — приводим к двум.
+    lang = {"rus": "ru", "eng": "en", "uzb": "uz"}.get(lang, lang)
+
+    title, title_foreign = _pick_languages(record.titles, lang)
+    annotation, annotation_foreign = _pick_languages(record.descriptions, lang)
+
+    keywords_by_lang = {k: ", ".join(v) for k, v in record.subjects.items() if v}
+    keywords, keywords_foreign = _pick_languages(keywords_by_lang, lang)
+
+    # Авторы приходят по списку на каждый язык — берём вариант основного языка,
+    # иначе первый список; склеивать все варианты нельзя, это одни и те же люди.
+    authors_list: list[str] = []
+    if record.creators:
+        by_lang = {k.split("-")[0]: v for k, v in record.creators.items()}
+        authors_list = by_lang.get(lang) or next(iter(record.creators.values()))
+
+    year = source.get("year") or parse_year(record.date)
+    row = {
+        "title": title or "",
+        "title_foreign": title_foreign,
+        "authors": ", ".join(authors_list) if authors_list else None,
+        "annotation": annotation,
+        "annotation_foreign": annotation_foreign,
+        "keywords": keywords,
+        "keywords_foreign": keywords_foreign,
+        "pages": source.get("pages"),
+        "doi": record.doi,
+        "year": year,
+        "volume": source.get("volume"),
+        "issue": source.get("issue"),
+    }
+    parsed, problems = build_parsed(row)
+    # Многоязычные поля build_parsed не знает — доносим их поверх.
+    parsed["title_foreign"] = title_foreign
+    parsed["annotation_foreign"] = annotation_foreign
+    parsed["keywords_foreign"] = keywords_foreign
+    parsed["landing_url"] = record.landing_url
+    if record.rights:
+        parsed["rights"] = record.rights[0]
+    return parsed, problems
+
+
 def source_key_of(row: dict[str, Any], parsed: dict[str, Any]) -> str:
     """Ключ строки в источнике: DOI, если есть, иначе хеш названия и выпуска.
 
@@ -411,6 +497,80 @@ class ImportDomain:
 
         await self.revalidate(db, job)
         return {"parsed": len(items), "skipped_in_file": len(rows) - len(items), "unknown_columns": unknown_columns}
+
+    async def load_oai(self, db: AsyncSession, job: ImportJob) -> dict[str, Any]:
+        """Забрать записи со старого сайта и разложить их в кандидаты.
+
+        Метаданные берём из OAI одним обходом. Landing page здесь НЕ трогаем:
+        это запрос на каждую статью, и для архива в тысячу работ разбор занял бы
+        полчаса. Добогащение и файлы — на этапе применения, только для тех
+        записей, которые клиент действительно импортирует.
+        """
+        from src.infrastructure.external.oai import OaiError, list_records
+
+        params = job.params or {}
+        base_url = params.get("base_url")
+        if not base_url:
+            raise ImportError_("В задаче не указан адрес репозитория")
+
+        try:
+            records = await list_records(
+                base_url,
+                set_spec=params.get("set"),
+                date_from=params.get("from"),
+                date_until=params.get("until"),
+                limit=MAX_ITEMS_PER_JOB,
+            )
+        except OaiError as e:
+            raise ImportError_(str(e)) from e
+
+        if not records:
+            raise ImportError_(
+                "Репозиторий не отдал ни одной записи. Проверьте выбранный журнал "
+                "и диапазон дат."
+            )
+
+        await db.execute(
+            ImportItem.__table__.delete().where(
+                ImportItem.job_id == job.id, ImportItem.status != "created"
+            )
+        )
+
+        items: list[ImportItem] = []
+        seen: set[str] = set()
+        for record in records:
+            parsed, problems = parsed_from_oai(record)
+            key = record.identifier or source_key_of({}, parsed)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(
+                ImportItem(
+                    job_id=job.id,
+                    source_key=key,
+                    raw={
+                        "identifier": record.identifier,
+                        "source": record.source,
+                        "landing_url": record.landing_url,
+                        "datestamp": record.datestamp,
+                    },
+                    parsed=parsed,
+                    issue_key=issue_key_of(
+                        parsed.get("publication_year"), parsed.get("volume"), parsed.get("issue")
+                    ),
+                    status="invalid" if problems else "pending",
+                    problems=problems,
+                    # Файл известен только после захода на landing page —
+                    # помечаем намерение, а не готовую ссылку.
+                    pdf_source=record.landing_url,
+                )
+            )
+
+        db.add_all(items)
+        job.status = "parsing"
+        await db.commit()
+        await self.revalidate(db, job)
+        return {"parsed": len(items), "skipped_in_file": len(records) - len(items), "unknown_columns": []}
 
     async def revalidate(self, db: AsyncSession, job: ImportJob) -> None:
         """Пересчитать дубликаты и сводку. Дёшево — идёт после каждой правки."""
@@ -606,9 +766,84 @@ class ImportDomain:
             stmt = stmt.where(ImportItem.id.in_(list(item_ids)))
         return list((await db.execute(stmt)).scalars().all())
 
+    async def _enrich_from_landing(self, job: ImportJob, item: ImportItem) -> None:
+        """Дотянуть со страницы статьи то, чего нет в OAI, и забрать PDF.
+
+        Ни одна неудача здесь не отменяет импорт статьи: старый сайт может
+        лежать, отдавать файл только по подписке или вовсе не иметь PDF. Тогда
+        статья приезжает с метаданными и замечанием, а не теряется целиком.
+        """
+        import asyncio
+
+        from src.infrastructure.external.landing import fetch_landing, fetch_pdf
+        from src.infrastructure.external.safe_fetch import FetchError
+        from src.infrastructure.storage import StorageNotConfigured, public_url, storage
+
+        parsed = dict(item.parsed or {})
+        landing_url = parsed.get("landing_url") or item.pdf_source
+        if not landing_url:
+            return
+
+        problems = list(item.problems or [])
+        try:
+            landing = await fetch_landing(landing_url)
+        except FetchError as e:
+            problems.append(
+                {"field": "", "code": "landing_failed", "message": f"Страница статьи недоступна: {e}"}
+            )
+            item.problems = problems
+            return
+
+        # Заполняем только пустое: то, что клиент уже поправил руками в превью,
+        # чужой сайт перебивать не должен.
+        if not parsed.get("doi") and landing.doi:
+            parsed["doi"] = normalize_doi(landing.doi)
+        if not parsed.get("pages") and landing.pages:
+            parsed["pages"] = landing.pages
+        if not parsed.get("authors") and landing.authors:
+            parsed["authors"] = ", ".join(landing.authors)
+        if not parsed.get("volume") and landing.volume:
+            parsed["volume"] = landing.volume
+        if not parsed.get("issue") and landing.issue:
+            parsed["issue"] = landing.issue
+        item.parsed = parsed
+        item.issue_key = issue_key_of(
+            parsed.get("publication_year"), parsed.get("volume"), parsed.get("issue")
+        )
+
+        if item.pdf_url or not landing.pdf_url:
+            if not landing.pdf_url:
+                problems.append(
+                    {"field": "pdf", "code": "no_pdf", "message": "На странице статьи нет ссылки на PDF"}
+                )
+                item.problems = problems
+            return
+
+        try:
+            content = await fetch_pdf(landing.pdf_url)
+        except FetchError as e:
+            problems.append({"field": "pdf", "code": "pdf_failed", "message": str(e)[:200]})
+            item.problems = problems
+            return
+
+        key = f"pdfs/{slugify(parsed.get('title') or 'article')[:60]}-{int(time.time() * 1000)}.pdf"
+        try:
+            await asyncio.to_thread(storage.put, key, content, "application/pdf")
+        except StorageNotConfigured:
+            problems.append(
+                {"field": "pdf", "code": "storage_off", "message": "Хранилище файлов не настроено"}
+            )
+            item.problems = problems
+            return
+        item.pdf_url = public_url(key) or key
+
     async def _create_article(
         self, db: AsyncSession, job: ImportJob, item: ImportItem
     ) -> Article:
+        if job.source_type == "oai":
+            # Дорогой шаг (два внешних запроса), поэтому здесь, а не при разборе:
+            # платим только за статьи, которые действительно импортируют.
+            await self._enrich_from_landing(job, item)
         parsed = item.parsed or {}
         issue = await self._get_or_create_issue(db, job, parsed)
 
