@@ -612,3 +612,106 @@ class ImportItem(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     job = relationship("ImportJob", back_populates="items")
+
+
+# ---------------------------------------------------------------------------
+# Проверка на заимствования (см. src/domain/similarity.py)
+# ---------------------------------------------------------------------------
+
+class ArticleText(Base):
+    """Извлечённый текст статьи — исходник для отпечатков и для показа фрагментов.
+
+    Отдельная таблица, а не колонка в articles: текст статьи весит десятки
+    килобайт, а списки статей тянут articles десятками строк — держать это в
+    горячей таблице значит гонять мегабайты на каждой странице каталога.
+    """
+
+    __tablename__ = "article_texts"
+
+    article_id = Column(
+        BigInteger, ForeignKey("articles.id", ondelete="CASCADE"), primary_key=True
+    )
+    # Не `text`: это имя занято функцией sqlalchemy.text, импортированной в
+    # модуле, и колонка затенила бы её для всех server_default ниже.
+    content = Column(Text, nullable=False)
+    words_count = Column(Integer, nullable=False, server_default=text("0"))
+    shingles_total = Column(Integer, nullable=False, server_default=text("0"))
+    # 'ok' — текст есть; 'no_text_layer' — скан без текстового слоя (проверять
+    # нечего, и это надо показать редактору, а не выдавать 0% заимствований).
+    status = Column(Text, nullable=False, server_default=text("'ok'::text"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ArticleFingerprint(Base):
+    """Отпечаток статьи: один шингл после winnowing."""
+
+    __tablename__ = "article_fingerprints"
+    __table_args__ = (
+        # Поиск идёт «дай все статьи с такими хешами» — индекс по хешу и есть
+        # рабочая лошадь проверки.
+        Index("ix_article_fingerprints_hash", "hash"),
+    )
+
+    article_id = Column(
+        BigInteger, ForeignKey("articles.id", ondelete="CASCADE"), primary_key=True
+    )
+    hash = Column(BigInteger, primary_key=True)
+    position = Column(Integer, nullable=False)  # индекс первого слова шингла
+
+
+class PlagiarismCheck(Base):
+    """Проверка документа на заимствования."""
+
+    __tablename__ = "plagiarism_checks"
+    __table_args__ = (
+        CheckConstraint(
+            "status = ANY (ARRAY['pending'::text, 'running'::text, 'done'::text, "
+            "'failed'::text])",
+            name="plagiarism_checks_status_check",
+        ),
+        Index("ix_plagiarism_checks_journal", "journal_id", "created_at"),
+    )
+
+    id = Column(BigInteger, Identity(always=True), primary_key=True)
+    # Проверяем либо уже заведённую статью, либо присланный файл (тогда пусто).
+    article_id = Column(
+        BigInteger, ForeignKey("articles.id", ondelete="SET NULL"), nullable=True
+    )
+    journal_id = Column(BigInteger, ForeignKey("journals.id", ondelete="CASCADE"), nullable=True)
+    created_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=True)
+    title = Column(Text, nullable=True)          # имя файла или заголовок статьи
+    status = Column(Text, nullable=False, server_default=text("'pending'::text"))
+    # Доля шинглов документа, нашедшихся в базе, в процентах.
+    score = Column(Numeric, nullable=True)
+    words_count = Column(Integer, nullable=True)
+    details = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+    matches = relationship(
+        "PlagiarismMatch", back_populates="check", cascade="all, delete-orphan"
+    )
+
+
+class PlagiarismMatch(Base):
+    """Найденный источник заимствования и совпавшие с ним фрагменты."""
+
+    __tablename__ = "plagiarism_matches"
+    __table_args__ = (Index("ix_plagiarism_matches_check", "check_id", "score"),)
+
+    id = Column(BigInteger, Identity(always=True), primary_key=True)
+    check_id = Column(
+        BigInteger, ForeignKey("plagiarism_checks.id", ondelete="CASCADE"), nullable=False
+    )
+    source_article_id = Column(
+        BigInteger, ForeignKey("articles.id", ondelete="CASCADE"), nullable=True
+    )
+    # Внешние источники (CORE, веб) появятся позже — тогда пригодится URL.
+    source_url = Column(Text, nullable=True)
+    source_title = Column(Text, nullable=True)
+    matched_shingles = Column(Integer, nullable=False, server_default=text("0"))
+    score = Column(Numeric, nullable=False, server_default=text("0"))
+    fragments = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+
+    check = relationship("PlagiarismCheck", back_populates="matches")

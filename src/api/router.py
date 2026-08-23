@@ -22,6 +22,7 @@ from src.api.v1 import (
     news,
     security,
     imports,
+    plagiarism,
 )
 
 api_router = APIRouter()
@@ -68,3 +69,5 @@ api_router.include_router(news.router, prefix="/news", tags=["news"])
 api_router.include_router(security.router, prefix="/security", tags=["security"])
 # Импорт архивов с других платформ (import-integration.md).
 api_router.include_router(imports.router, prefix="/import", tags=["import"])
+# Проверка на заимствования по базе платформы.
+api_router.include_router(plagiarism.router, prefix="/plagiarism", tags=["plagiarism"])
