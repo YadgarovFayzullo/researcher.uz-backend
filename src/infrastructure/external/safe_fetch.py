@@ -125,26 +125,42 @@ async def fetch(
             headers["Accept"] = accept
 
         response = await _request_with_retry(current, headers, timeout, retries)
+        # Клиент живёт ровно столько, сколько читается тело ответа. Забыть его
+        # закрыть нельзя: на каждый запрос создаётся новый, и за тысячу статей
+        # накапливается тысяча открытых пулов — импорт вставал наглухо, хотя
+        # чужой сайт отвечал за доли секунды.
+        client: httpx.AsyncClient | None = getattr(response, "_import_client", None)
+
+        async def _release() -> None:
+            await response.aclose()
+            if client is not None:
+                await client.aclose()
 
         if response.status_code in (301, 302, 303, 307, 308):
             location = response.headers.get("location")
+            await _release()
             if not location:
                 raise FetchError(f"Редирект без адреса: {current}")
             current = str(httpx.URL(current).join(location))
             continue
 
         if response.status_code >= 400:
-            raise FetchError(f"{current} → HTTP {response.status_code}")
+            status = response.status_code
+            await _release()
+            raise FetchError(f"{current} → HTTP {status}")
 
         # Читаем потоком: без этого «файл» произвольного размера уедет в память
         # целиком ещё до того, как мы посмотрим на Content-Length.
         body = bytearray()
-        async for chunk in response.aiter_bytes():
-            body.extend(chunk)
-            if len(body) > max_bytes:
-                await response.aclose()
-                raise FetchError(f"Файл больше допустимых {max_bytes // (1024 * 1024)} МБ")
-        await response.aclose()
+        try:
+            async for chunk in response.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > max_bytes:
+                    raise FetchError(
+                        f"Файл больше допустимых {max_bytes // (1024 * 1024)} МБ"
+                    )
+        finally:
+            await _release()
 
         return FetchResult(
             url=current,
