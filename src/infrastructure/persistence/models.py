@@ -659,6 +659,21 @@ class ArticleFingerprint(Base):
     position = Column(Integer, nullable=False)  # индекс первого слова шингла
 
 
+class CommonFingerprint(Base):
+    """Шаблонная фраза — шингл, который встречается в слишком многих статьях.
+
+    Колонтитулы («Ilmiy-nazariy va metodik jurnal», ISSN, номер выпуска) и
+    канцелярские обороты сидят в сотнях статей: один такой шингл нашёлся сразу
+    в 1863 работах. Без стоп-листа все статьи одного журнала выглядят как
+    заимствования друг у друга. Список пересчитывается скриптом по индексу.
+    """
+
+    __tablename__ = "common_fingerprints"
+
+    hash = Column(BigInteger, primary_key=True)
+    articles_count = Column(Integer, nullable=False, server_default=text("0"))
+
+
 class PlagiarismCheck(Base):
     """Проверка документа на заимствования."""
 

@@ -115,6 +115,47 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
+# Колонтитул повторяется на каждой странице. Короткая строка, встретившаяся
+# трижды и чаще, — это почти наверняка он, а не осмысленный текст.
+_RUNNING_HEAD_MIN_REPEATS = 3
+_RUNNING_HEAD_MAX_LEN = 120
+
+
+def strip_running_heads(text: str) -> str:
+    """Убрать колонтитулы и номера страниц.
+
+    Зачем: в шапке статьи стоит название журнала, ISSN и номер выпуска
+    («INTER STUDY ISSN 3030-9575 … 2026, volume 2, issue 2»), и оно повторяется
+    на каждой странице КАЖДОЙ статьи журнала. Без вычистки все статьи одного
+    издания выглядят как заимствования друг у друга: в базе нашёлся колонтитул,
+    сидящий сразу в 1863 статьях.
+    """
+    if not text:
+        return text
+
+    lines = text.split("\n")
+    counts: dict[str, int] = {}
+    for line in lines:
+        stripped = line.strip()
+        if stripped and len(stripped) <= _RUNNING_HEAD_MAX_LEN:
+            counts[stripped] = counts.get(stripped, 0) + 1
+
+    repeated = {
+        line for line, count in counts.items() if count >= _RUNNING_HEAD_MIN_REPEATS
+    }
+    if not repeated:
+        return text
+
+    kept = [
+        line
+        for line in lines
+        # Голые номера страниц выкидываем всегда: они дают ложные совпадения
+        # длиной в одно «слово», а смысла не несут.
+        if line.strip() not in repeated and not line.strip().isdigit()
+    ]
+    return "\n".join(kept)
+
+
 def pdf_to_checkable_text(pdf_bytes: bytes) -> str:
-    """PDF → текст, готовый к сравнению: без вёрстки и без библиографии."""
-    return strip_references(clean_text(extract_text(pdf_bytes)))
+    """PDF → текст, готовый к сравнению: без вёрстки, колонтитулов и библиографии."""
+    return strip_references(strip_running_heads(clean_text(extract_text(pdf_bytes))))

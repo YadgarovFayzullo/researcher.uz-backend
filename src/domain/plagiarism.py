@@ -38,6 +38,7 @@ from src.infrastructure.persistence.models import (
     Article,
     ArticleFingerprint,
     ArticleText,
+    CommonFingerprint,
     Issue,
     Journal,
     PlagiarismCheck,
@@ -168,6 +169,17 @@ class PlagiarismDomain:
 
             prints = fingerprints(text)
             by_hash = {h: pos for h, pos in prints}
+            # Шаблонные фразы выкидываем и из числителя, и из знаменателя:
+            # колонтитул журнала не заимствование, но и «объёмом текста» его
+            # считать нельзя — иначе процент поедет у всех статей издания.
+            common = await self._common_hashes(db, list(by_hash.keys()))
+            if common:
+                by_hash = {h: pos for h, pos in by_hash.items() if h not in common}
+            if not by_hash:
+                raise TooShort(
+                    "В тексте не осталось ничего для сравнения: похоже, это "
+                    "титульная страница или сплошной шаблонный текст."
+                )
             matches = await self._find_matches(db, check, by_hash, text)
             # Позиции слов в исходном тексте — основа подсветки в отчёте.
             tokens = tokenize_with_spans(text)
@@ -194,12 +206,26 @@ class PlagiarismDomain:
                     )
                 )
 
+            # Две разные метрики, и путать их нельзя:
+            #  * score — доля совпавших отпечатков, метрика алгоритма;
+            #  * text_coverage — сколько ТЕКСТА закрашено маркером.
+            # Редактор смотрит на подсветку, поэтому в отчёте главная вторая:
+            # повторяющаяся авторская фраза даёт мало уникальных отпечатков и
+            # завышает score, хотя заимствована половина документа.
+            covered = self._covered_chars(
+                [span for row in matches[:MAX_SOURCES] for span in self._spans(tokens, row["positions"])]
+            )
+            text_coverage = round(covered * 100.0 / max(1, len(text)), 2)
+
             check.score = score
             check.words_count = len(words)
             check.content = text
             check.details = {
                 "fingerprints": len(by_hash),
                 "sources_found": len(matches),
+                "text_coverage": text_coverage,
+                "covered_chars": covered,
+                "template_phrases_skipped": len(common),
                 "engine": "platform-db",
             }
             check.status = "done"
@@ -220,6 +246,17 @@ class PlagiarismDomain:
 
         await db.refresh(check)
         return check
+
+    async def _common_hashes(self, db: AsyncSession, hashes: list[int]) -> set[int]:
+        """Какие из этих шинглов — шаблонные фразы (см. CommonFingerprint)."""
+        if not hashes:
+            return set()
+        rows = (
+            await db.execute(
+                select(CommonFingerprint.hash).where(CommonFingerprint.hash.in_(hashes))
+            )
+        ).scalars().all()
+        return set(rows)
 
     async def _find_matches(
         self,
@@ -311,6 +348,18 @@ class PlagiarismDomain:
             else:
                 merged.append([start, end])
         return merged
+
+    def _covered_chars(self, spans: list[list[int]]) -> int:
+        """Сколько символов закрашено суммарно, без двойного счёта пересечений."""
+        if not spans:
+            return 0
+        merged: list[list[int]] = []
+        for start, end in sorted(spans):
+            if merged and start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        return sum(end - start for start, end in merged)
 
     def _fragments(
         self, text: str, positions: Sequence[tuple[int, int]]
