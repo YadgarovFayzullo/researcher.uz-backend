@@ -21,6 +21,8 @@ class PlagiarismCheckPublic(BaseModel):
     words_count: int | None = None
     details: dict[str, Any] = Field(default_factory=dict)
     error: str | None = None
+    # Текст документа — отчёт рисует его целиком с подсветкой заимствований.
+    content: str | None = None
     created_at: datetime.datetime
     finished_at: datetime.datetime | None = None
 
@@ -39,6 +41,8 @@ class PlagiarismMatchPublic(BaseModel):
     matched_shingles: int
     score: float
     fragments: list[dict[str, Any]] = Field(default_factory=list)
+    # Интервалы [начало, конец) в символах `check.content`.
+    spans: list[list[int]] = Field(default_factory=list)
 
     @field_serializer("score")
     def _round_score(self, value: float) -> float:

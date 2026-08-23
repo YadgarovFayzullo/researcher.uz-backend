@@ -23,7 +23,7 @@ from sqlalchemy import select
 from src.domain.plagiarism import PlagiarismDomain
 from src.infrastructure.pdf_text import pdf_to_checkable_text
 from src.infrastructure.persistence.db import AsyncSessionLocal
-from src.infrastructure.persistence.models import Article, ArticleText
+from src.infrastructure.persistence.models import Article, ArticleFingerprint, ArticleText
 from src.infrastructure.storage import StorageNotConfigured, key_from_url, storage
 
 
@@ -47,6 +47,11 @@ async def main() -> int:
     p.add_argument("--all", action="store_true", help="обойти всю базу")
     p.add_argument("--article", type=int, help="только одна статья по id")
     p.add_argument("--force", action="store_true", help="переиндексировать уже готовые")
+    p.add_argument(
+        "--repair",
+        action="store_true",
+        help="только статьи с текстом, но без отпечатков (упавшие прошлые прогоны)",
+    )
     args = p.parse_args()
 
     domain = PlagiarismDomain()
@@ -57,6 +62,16 @@ async def main() -> int:
         stmt = select(Article.id, Article.pdf, Article.title).where(Article.pdf.isnot(None))
         if args.article:
             stmt = stmt.where(Article.id == args.article)
+        elif args.repair:
+            broken = (
+                select(ArticleText.article_id)
+                .outerjoin(
+                    ArticleFingerprint,
+                    ArticleFingerprint.article_id == ArticleText.article_id,
+                )
+                .where(ArticleText.status == "ok", ArticleFingerprint.article_id.is_(None))
+            )
+            stmt = stmt.where(Article.id.in_(broken))
         elif not args.force:
             # Уже проиндексированные пропускаем — скрипт догоняет только новое.
             indexed = select(ArticleText.article_id)

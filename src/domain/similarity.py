@@ -49,6 +49,14 @@ _CYR_TO_LAT = {
 }
 
 _WORD_SPLIT = re.compile(r"[^\w]+", re.UNICODE)
+# Токен для разбора с позициями: апострофы входят внутрь слова, потому что
+# нормализация их выбрасывает («o'zbek» → «ozbek», одно слово).
+_WORD_WITH_APOSTROPHES = re.compile(r"[\w'‘’`´ʼ]+", re.UNICODE)
+
+
+def _normalize_token(token: str) -> str:
+    lowered = unicodedata.normalize("NFKC", token).lower().translate(_APOSTROPHES)
+    return "".join(_CYR_TO_LAT.get(ch, ch) for ch in lowered)
 
 
 def normalize_words(text: str) -> list[str]:
@@ -58,6 +66,29 @@ def normalize_words(text: str) -> list[str]:
     lowered = unicodedata.normalize("NFKC", text).lower().translate(_APOSTROPHES)
     folded = "".join(_CYR_TO_LAT.get(ch, ch) for ch in lowered)
     return [w for w in _WORD_SPLIT.split(folded) if w]
+
+
+def tokenize_with_spans(text: str) -> list[tuple[str, int, int]]:
+    """То же разбиение на слова, но с позициями в ИСХОДНОМ тексте.
+
+    Нужно для подсветки: отчёт показывает документ целиком и закрашивает
+    заимствованные куски, а позиции совпадений считаются по нормализованным
+    словам. Без этой функции пришлось бы искать фрагменты в тексте поиском по
+    подстроке — и промахиваться на каждом повторе.
+
+    Список слов здесь обязан совпадать с `normalize_words`, иначе индексы
+    разъедутся: апострофы включены в класс токена, потому что нормализация их
+    удаляет и «o'zbek» — одно слово, а не два.
+    """
+    if not text:
+        return []
+    out: list[tuple[str, int, int]] = []
+    for match in _WORD_WITH_APOSTROPHES.finditer(text):
+        word = _normalize_token(match.group(0))
+        # Токен из одних апострофов после нормализации пуст — он не слово.
+        if word:
+            out.append((word, match.start(), match.end()))
+    return out
 
 
 def _hash(words: tuple[str, ...]) -> int:

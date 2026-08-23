@@ -686,6 +686,9 @@ class PlagiarismCheck(Base):
     words_count = Column(Integer, nullable=True)
     details = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     error = Column(Text, nullable=True)
+    # Текст проверенного документа: отчёт показывает его целиком с подсветкой
+    # заимствований, а исходный файл к тому времени уже не хранится.
+    content = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     finished_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -713,5 +716,8 @@ class PlagiarismMatch(Base):
     matched_shingles = Column(Integer, nullable=False, server_default=text("0"))
     score = Column(Numeric, nullable=False, server_default=text("0"))
     fragments = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    # Интервалы [начало, конец) в символах исходного текста — то, что подсвечено
+    # маркером в отчёте.
+    spans = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
 
     check = relationship("PlagiarismCheck", back_populates="matches")

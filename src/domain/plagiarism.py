@@ -27,9 +27,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.similarity import (
     MIN_WORDS,
+    SHINGLE_SIZE,
     extract_fragment,
     fingerprints,
     normalize_words,
+    tokenize_with_spans,
     total_shingles,
 )
 from src.infrastructure.persistence.models import (
@@ -49,6 +51,9 @@ MIN_SOURCE_SCORE = 1.0
 MAX_SOURCES = 10
 # Сколько фрагментов приводим по каждому источнику.
 MAX_FRAGMENTS = 5
+# Строк отпечатков в одном INSERT. Лимит Postgres — 32767 параметров на запрос,
+# у нас три колонки на строку, поэтому берём с запасом.
+FINGERPRINT_INSERT_CHUNK = 5000
 
 
 class PlagiarismError(Exception):
@@ -100,13 +105,17 @@ class PlagiarismDomain:
         await db.execute(
             delete(ArticleFingerprint).where(ArticleFingerprint.article_id == article_id)
         )
-        if prints:
+        # Вставляем пачками: в одном запросе Postgres принимает не больше 32767
+        # параметров, а у монографии на 300 страниц отпечатков втрое больше —
+        # одним INSERT такие документы не проходили вовсе.
+        for start in range(0, len(prints), FINGERPRINT_INSERT_CHUNK):
+            chunk = prints[start : start + FINGERPRINT_INSERT_CHUNK]
             await db.execute(
                 pg_insert(ArticleFingerprint)
                 .values(
                     [
                         {"article_id": article_id, "hash": h, "position": pos}
-                        for h, pos in prints
+                        for h, pos in chunk
                     ]
                 )
                 .on_conflict_do_nothing()
@@ -160,6 +169,8 @@ class PlagiarismDomain:
             prints = fingerprints(text)
             by_hash = {h: pos for h, pos in prints}
             matches = await self._find_matches(db, check, by_hash, text)
+            # Позиции слов в исходном тексте — основа подсветки в отчёте.
+            tokens = tokenize_with_spans(text)
 
             matched_hashes: set[int] = set()
             for row in matches:
@@ -179,11 +190,13 @@ class PlagiarismDomain:
                         matched_shingles=len(row["hashes"]),
                         score=row["score"],
                         fragments=row["fragments"],
+                        spans=self._spans(tokens, row["positions"]),
                     )
                 )
 
             check.score = score
             check.words_count = len(words)
+            check.content = text
             check.details = {
                 "fingerprints": len(by_hash),
                 "sources_found": len(matches),
@@ -259,11 +272,45 @@ class PlagiarismDomain:
                     "url": meta.get("url"),
                     "score": score,
                     "hashes": entry["hashes"],
+                    # Позиции нужны и фрагментам, и подсветке — отдаём наружу,
+                    # а не прячем внутри построения фрагментов.
+                    "positions": entry["positions"],
                     "fragments": self._fragments(text, entry["positions"]),
                 }
             )
         result.sort(key=lambda row: row["score"], reverse=True)
         return result
+
+    def _spans(
+        self, tokens: list[tuple[str, int, int]], positions: Sequence[tuple[int, int]]
+    ) -> list[list[int]]:
+        """Совпавшие шинглы → интервалы символов для маркера.
+
+        Шингл — это шесть слов, поэтому каждое совпадение красит отрезок от
+        первого слова до шестого. Соседние и пересекающиеся отрезки склеиваем:
+        заимствованный абзац должен выглядеть одной полосой, а не полосатым
+        зеброй-текстом из десятков подсветок.
+        """
+        if not tokens:
+            return []
+
+        raw: list[tuple[int, int]] = []
+        for doc_word_index, _source_position in positions:
+            if doc_word_index >= len(tokens):
+                continue
+            last_word = min(doc_word_index + SHINGLE_SIZE - 1, len(tokens) - 1)
+            raw.append((tokens[doc_word_index][1], tokens[last_word][2]))
+
+        raw.sort()
+        merged: list[list[int]] = []
+        for start, end in raw:
+            # Небольшой зазор тоже склеиваем: между двумя совпавшими шинглами
+            # часто стоит одно несовпавшее слово-связка.
+            if merged and start - merged[-1][1] <= 40:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        return merged
 
     def _fragments(
         self, text: str, positions: Sequence[tuple[int, int]]
