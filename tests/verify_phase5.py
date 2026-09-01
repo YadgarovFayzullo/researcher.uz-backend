@@ -86,14 +86,15 @@ async def main():
         await db.flush()
 
         # ---------- interactions ----------
-        # a1: 3 views (разные IP), 1 download; a2: 1 view
-        db.add_all([
-            ArticleInteraction(article_id=a1.id, ip_address="10.0.0.1", view=1),
-            ArticleInteraction(article_id=a1.id, ip_address="10.0.0.2", view=1),
-            ArticleInteraction(article_id=a1.id, ip_address="10.0.0.3", view=1),
-            ArticleInteraction(article_id=a1.id, ip_address="10.0.0.4", download=1),
-            ArticleInteraction(article_id=a2.id, ip_address="10.0.0.5", view=1),
-        ])
+        # a1: 3 views (разные IP), 1 download; a2: 1 view.
+        # Пишем через StatsDomain, а не вставкой в article_interactions: сервисы
+        # ниже читают денормализованные счётчики articles.views_count /
+        # downloads_count, а двигает их только этот путь (StatsDomain._bump).
+        await db.commit()
+        for ip in ("10.0.0.1", "10.0.0.2", "10.0.0.3"):
+            await stats.record_view(db, a1.id, ip)
+        await stats.record_download(db, a1.id, "10.0.0.4")
+        await stats.record_view(db, a2.id, "10.0.0.5")
         # ---------- citations graph ----------
         # a2 и a3 цитируют a1 (внутренний счётчик a1 = 2); external a1 = 7
         db.add_all([
@@ -109,7 +110,10 @@ async def main():
         check("a1 views", batch[a1.id]["views"], 3)
         check("a1 downloads", batch[a1.id]["downloads"], 1)
         check("a2 views", batch[a2.id]["views"], 1)
-        check("a3 absent (no interactions)", a3.id in batch, False)
+        # Раньше батч агрегировал сам лог и статью без взаимодействий пропускал.
+        # После денормализации он читает счётчики самой статьи, поэтому строка
+        # есть у каждой запрошенной — просто с нулями.
+        check("a3 присутствует с нулями", batch[a3.id]["views"], 0)
 
         print("stats.get_journal_stats:")
         jstats = {r["journal_id"]: r for r in await stats.get_journal_stats(db)}

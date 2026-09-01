@@ -17,6 +17,7 @@ import uuid
 from sqlalchemy import delete, select
 
 from src.domain.article import ArticleDomain
+from src.domain.stats import StatsDomain
 from src.infrastructure.persistence.db import AsyncSessionLocal
 from src.infrastructure.persistence.models import (
     Article,
@@ -131,14 +132,16 @@ async def main() -> int:
                 title=f"PART Статья {tag}", issue_id=issue.id, publication_type="article"
             ),
         )
-        db.add_all([
-            ArticleInteraction(article_id=a2.id, view=1),
-            ArticleInteraction(article_id=a2.id, view=1),
-            ArticleInteraction(article_id=a2.id, download=1),
-        ])
+        # Через StatsDomain, а не вставкой в article_interactions напрямую:
+        # листинг читает денормализованные счётчики articles.views_count /
+        # downloads_count, а их двигает только этот путь. Разные IP — иначе
+        # сработает дедуп «одна отметка с адреса в час».
+        await StatsDomain.record_view(db, a2.id, "203.0.113.1")
+        await StatsDomain.record_view(db, a2.id, "203.0.113.2")
+        await StatsDomain.record_download(db, a2.id, "203.0.113.3")
         await db.commit()
 
-        items, total = await dom.list_articles(db, journal_id=journal.id)
+        items, total = await dom.list_articles(db, journal_id=[journal.id])
         check("фильтр по журналу через выпуски", total, 1)
         check("вернулась статья выпуска", items[0]["id"], a2.id)
         check("имя журнала доклеено", items[0]["journal_name"], f"PART J {tag}")
@@ -151,14 +154,14 @@ async def main() -> int:
         check("просмотры посчитаны", items[0]["views"], 2)
         check("скачивания посчитаны", items[0]["downloads"], 1)
 
-        items, _ = await dom.list_articles(db, journal_id=journal.id)
+        items, _ = await dom.list_articles(db, journal_id=[journal.id])
         check_true("тяжёлые поля не выгружаются", "embedding" not in items[0])
         check_true("tsvector не выгружается", "search_vector" not in items[0])
 
         cnt = await dom.count_articles(
             db,
             issue_id=None,
-            journal_id=journal.id,
+            journal_id=[journal.id],
             publisher_id=None,
             admin_id=None,
             section_id=None,
@@ -166,6 +169,8 @@ async def main() -> int:
             field_of_science=None,
             published=None,
             has_doi=None,
+            has_issue=None,
+            created_after=None,
         )
         check("count совпадает с total списка", cnt, 1)
 

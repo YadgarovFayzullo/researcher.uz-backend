@@ -132,7 +132,9 @@ class StatsDomain:
     ) -> list[dict]:
         """Порт get_article_stats(bigint[]): {article_id, views, downloads}.
 
-        Только статьи, у которых есть взаимодействия (group by article_id).
+        Читает денормализованные счётчики самой статьи, а не агрегирует лог,
+        поэтому — в отличие от исходного RPC — строка есть у КАЖДОЙ запрошенной
+        статьи: без взаимодействий она приходит с нулями, а не пропадает.
         """
         if not article_ids:
             return []
@@ -155,7 +157,8 @@ class StatsDomain:
     async def get_journal_stats(db: AsyncSession) -> list[dict]:
         """Порт get_journal_stats(): {journal_id, views, downloads} по всем журналам.
 
-        Агрегирует interactions через article → issue → journal.
+        Суммирует счётчики статей (articles.views_count / downloads_count) через
+        article → issue → journal. Сам лог article_interactions здесь не читается.
         """
         rows = (
             await db.execute(
