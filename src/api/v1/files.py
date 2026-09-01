@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sqlalchemy import select
 
+from src.core.pdf_guard import check_download
 from src.domain.article import ArticleDomain
 from src.infrastructure.persistence.db import get_db
 from src.infrastructure.persistence.models import Issue
@@ -31,6 +32,16 @@ _CACHE = (
     "public, max-age=0, must-revalidate, s-maxage=86400, "
     "stale-while-revalidate=604800"
 )
+
+
+def _too_many(seconds: int) -> Response:
+    """Лимит выборки исчерпан. 429 с Retry-After — вежливый способ сказать
+    роботу «приходи позже»; живой читатель до этого порога не доходит."""
+    return Response(
+        "Too many downloads",
+        status_code=429,
+        headers={"Retry-After": str(seconds), "Cache-Control": "no-store"},
+    )
 
 
 async def _stream_object(
@@ -110,6 +121,10 @@ async def serve_issue_pdf(
     ) if p]
     filename = _SAFE_SLUG.sub("", "-".join(name_parts) or f"issue-{clean_id}")
 
+    ban = await check_download(request, f"issue:{issue.id}")
+    if ban:
+        return _too_many(ban)
+
     return await _stream_object(
         request,
         key=key_from_url(issue.full_pdf, default_prefix="pdfs"),
@@ -144,6 +159,12 @@ async def serve_pdf(filename: str, request: Request, db: AsyncSession = Depends(
 
     if not article or not article.pdf:
         return Response("Not found", status_code=404)
+
+    # Лимит считаем по найденной статье, а не по строке из URL: иначе обход
+    # несуществующих адресов набивал бы счётчик, а настоящая выкачка — нет.
+    ban = await check_download(request, f"article:{article.id}")
+    if ban:
+        return _too_many(ban)
 
     return await _stream_object(
         request,

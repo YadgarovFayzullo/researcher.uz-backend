@@ -61,6 +61,18 @@ class Settings(BaseSettings):
     # 43.172.0.0/15 — Tencent Cloud Singapore, август 2026.
     STATS_BLOCKED_NETWORKS: str = "43.172.0.0/15"
 
+    # --- Защита раздачи PDF от массовой выкачки (см. src/core/pdf_guard.py) ---
+    # Сколько РАЗНЫХ файлов один IP может забрать за окно. Считаем файлы, а не
+    # запросы: просмотрщик тянет один PDF десятком Range-запросов.
+    PDF_RATE_LIMIT: int = 30
+    PDF_RATE_WINDOW_SECONDS: int = 3600
+    # На сколько закрывается доступ после превышения.
+    PDF_BAN_SECONDS: int = 3600
+    # Общий секрет с прокси фронта (`/pdf/<slug>.pdf` на Vercel ходит сюда сам,
+    # и без него мы видели бы IP Vercel, а не читателя). Пусто — доверяем
+    # только адресу сокета.
+    PDF_PROXY_SECRET: str | None = None
+
     # --- Cloudflare R2 (Storage, Фаза 6) — S3-совместимо ---
     R2_ACCOUNT_ID: str | None = None
     R2_ACCESS_KEY_ID: str | None = None
