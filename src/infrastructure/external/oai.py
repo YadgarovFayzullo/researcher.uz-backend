@@ -135,12 +135,40 @@ def set_hint_from_site(raw: str) -> str | None:
     return None if code in ("index", "oai") else code
 
 
+# Признаки страницы антибота вместо ответа репозитория.
+_CHALLENGE_MARKERS = (
+    b"\xd0\x92\xd1\x8b \xd1\x82\xd0\xbe\xd1\x87\xd0\xbd\xd0\xbe \xd1\x87\xd0\xb5\xd0\xbb\xd0\xbe\xd0\xb2\xd0\xb5\xd0\xba",  # «Вы точно человек»
+    b"cf-browser-verification",
+    b"challenge-platform",
+    b"Just a moment",
+    b"Attention Required",
+)
+
+
+def _looks_like_challenge(content: bytes, content_type: str | None) -> bool:
+    if content_type and "html" not in content_type.lower():
+        return False
+    head = content[:4096]
+    return any(marker in head for marker in _CHALLENGE_MARKERS)
+
+
 async def _request(base_url: str, params: dict[str, str]) -> ET.Element:
     url = f"{base_url}?{urlencode(params)}"
     try:
         result = await fetch(url, max_bytes=MAX_RESPONSE_BYTES, accept="application/xml")
     except FetchError as e:
         raise OaiError(str(e)) from e
+
+    # Источник закрылся антиботом. Отличать это от битого XML важно: чинить тут
+    # нечего, помогает только пауза, а сообщение «не разобрать как XML» уводит
+    # искать поломку в разметке. КиберЛенинка отдаёт страницу «Вы точно
+    # человек?» после нескольких тысяч запросов подряд — проверено 2026-09-01.
+    if _looks_like_challenge(result.content, result.content_type):
+        raise OaiError(
+            f"{urlparse(url).netloc} ответил страницей проверки «вы не робот» вместо данных. "
+            "Источник ограничил обход — сделайте паузу на несколько часов и "
+            "продолжите медленнее (IMPORT_MIN_INTERVAL) или частями по датам."
+        )
 
     try:
         root = ET.fromstring(result.content)
