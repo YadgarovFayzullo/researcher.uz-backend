@@ -24,15 +24,15 @@
 Пример:
     IMPORT_MIN_INTERVAL=3 python scripts/import_cyberleninka.py \
         --set journal_37143 --journal-id 10 --year 2023 \
-        --journal-title "Inter education & global study" --start 2024-01
+        --journal-title "Inter education & global study" \\
+        --start 2024-01-01 --window 7
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
 import sys
-from calendar import monthrange
-from datetime import date
+from datetime import date, timedelta
 
 from sqlalchemy import select
 
@@ -44,13 +44,13 @@ from src.infrastructure.persistence.models import ImportJob, Profile
 BASE_URL = "https://cyberleninka.ru/oai"
 
 
-def month_window(year: int, month: int) -> tuple[str, str]:
-    last = monthrange(year, month)[1]
-    return f"{year:04d}-{month:02d}-01", f"{year:04d}-{month:02d}-{last:02d}"
-
-
-def next_month(year: int, month: int) -> tuple[int, int]:
-    return (year + 1, 1) if month == 12 else (year, month + 1)
+def windows(start: date, end: date, days: int):
+    """Окна по `days` дней подряд, включительно с обоих концов."""
+    cur = start
+    while cur <= end:
+        stop = min(cur + timedelta(days=days - 1), end)
+        yield cur, stop
+        cur = stop + timedelta(days=1)
 
 
 async def get_job(db, args) -> ImportJob:
@@ -87,42 +87,47 @@ async def main() -> int:
     parser.add_argument("--journal-id", type=int, required=True, help="журнал на нашей платформе")
     parser.add_argument("--year", type=int, required=True, help="год публикации, который забираем")
     parser.add_argument("--journal-title", default=None, help="название журнала у источника")
-    parser.add_argument("--start", required=True, help="первый месяц окна, YYYY-MM")
-    parser.add_argument("--until", default=None, help="последний месяц окна, YYYY-MM (иначе — до пустых)")
+    parser.add_argument("--start", required=True, help="начало обхода, YYYY-MM-DD")
+    parser.add_argument("--until", default=None, help="конец обхода, YYYY-MM-DD (иначе — до пустых окон)")
+    parser.add_argument(
+        "--window",
+        type=int,
+        default=7,
+        help="ширина окна в днях. Проход берёт не больше 2000 записей "
+        "(MAX_ITEMS_PER_JOB), и на широком окне хвост просто теряется: "
+        "у КиберЛенинки в одном январе их больше двух тысяч",
+    )
     parser.add_argument(
         "--stop-after-empty",
         type=int,
-        default=2,
-        help="остановиться после стольких месяцев подряд без попаданий",
+        default=8,
+        help="остановиться после стольких окон подряд без попаданий",
     )
-    parser.add_argument("--retries", type=int, default=6, help="попыток на месяц при блокировке")
+    parser.add_argument("--retries", type=int, default=6, help="попыток на окно при блокировке")
     parser.add_argument("--backoff", type=int, default=1800, help="пауза после блокировки, сек")
     parser.add_argument("--job-id", type=int, default=None, help="дописать в существующую задачу")
     parser.add_argument("--created-by", default=None, help="автор задачи (UUID профиля); по умолчанию владелец")
     args = parser.parse_args()
 
-    start_year, start_month = (int(x) for x in args.start.split("-"))
-    stop = tuple(int(x) for x in args.until.split("-")) if args.until else None
+    start = date.fromisoformat(args.start)
+    # Без явного конца идём до сегодня, полагаясь на счётчик пустых окон.
+    end = date.fromisoformat(args.until) if args.until else date.today()
 
     domain = ImportDomain()
     async with AsyncSessionLocal() as db:
         job = await get_job(db, args)
         print(f"задача импорта #{job.id}, журнал {args.journal_id}", flush=True)
 
-        year, month = start_year, start_month
         empty_streak = 0
         first = args.job_id is None
         total_kept = 0
 
-        while True:
-            if stop and (year, month) > stop:
-                print("дошли до конца заданного окна", flush=True)
-                break
-            if not stop and empty_streak >= args.stop_after_empty:
-                print(f"{empty_streak} месяца подряд без попаданий — останавливаюсь", flush=True)
+        for window_start, window_end in windows(start, end, args.window):
+            if args.until is None and empty_streak >= args.stop_after_empty:
+                print(f"{empty_streak} окон подряд без попаданий — останавливаюсь", flush=True)
                 break
 
-            date_from, date_until = month_window(year, month)
+            date_from, date_until = window_start.isoformat(), window_end.isoformat()
             job.params = {
                 "base_url": BASE_URL,
                 "set": args.set_spec,
@@ -131,14 +136,14 @@ async def main() -> int:
                 "journal_title": args.journal_title,
                 "from": date_from,
                 "until": date_until,
-                # Закладка от прошлого месяца к новому окну отношения не имеет.
+                # Закладка от прошлого окна к новому отношения не имеет.
                 "resume_token": None,
             }
             await db.commit()
 
             for attempt in range(1, args.retries + 1):
                 try:
-                    # resume=True со второго месяца: иначе разбор стирает
+                    # resume=True со второго окна: иначе разбор стирает
                     # кандидатов, собранных прошлыми окнами.
                     await domain.load_oai(db, job, resume=not first)
                     break
@@ -170,8 +175,13 @@ async def main() -> int:
                 f"страница не далась {scan.get('landing_failed', 0)}",
                 flush=True,
             )
+            if scan.get("records", 0) >= 2000:
+                print(
+                    f"  ВНИМАНИЕ: окно упёрлось в потолок 2000 записей — сузьте --window, "
+                    f"хвост окна не просмотрен",
+                    flush=True,
+                )
             empty_streak = empty_streak + 1 if kept == 0 else 0
-            year, month = next_month(year, month)
 
         print(f"итого кандидатов за прогон: {total_kept}", flush=True)
         print(f"дальше — мастер импорта, задача #{job.id}", flush=True)
