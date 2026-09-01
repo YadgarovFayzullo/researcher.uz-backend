@@ -21,8 +21,12 @@
    Прокси присылает `X-Reader-IP` вместе с общим секретом, и только с ним мы
    этому заголовку верим.
 
-Состояние держим в памяти процесса: бэкенд — один контейнер, а переживать его
-перезапуск счётчику незачем.
+Состояние — в SQLite на диске контейнера, а НЕ в памяти процесса: uvicorn
+поднимает несколько воркеров (`WEB_CONCURRENCY`, по умолчанию 2), запросы
+раскидываются между ними случайно, и счётчик в памяти дал бы лимит, умноженный
+на число воркеров, и дырявый бан — на соседнем воркере тот же гость снова
+чистый. Файл общий для всех воркеров, переживать перезапуск контейнера ему не
+нужно: бан живёт час.
 """
 from __future__ import annotations
 
@@ -30,6 +34,7 @@ import asyncio
 import ipaddress
 import re
 import socket
+import sqlite3
 import time
 
 from fastapi import Request
@@ -54,12 +59,29 @@ _SEARCH_DOMAINS = (
 _BOT_TTL_SECONDS = 24 * 3600
 _bot_cache: dict[str, tuple[bool, float]] = {}
 
-# ip → {"files": {ключ файла: время}, "banned_until": время}
-_visitors: dict[str, dict] = {}
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS downloads (
+    ip       TEXT NOT NULL,
+    file_key TEXT NOT NULL,
+    at       REAL NOT NULL,
+    PRIMARY KEY (ip, file_key)
+);
+CREATE INDEX IF NOT EXISTS downloads_at ON downloads (at);
+CREATE TABLE IF NOT EXISTS bans (
+    ip    TEXT PRIMARY KEY,
+    until REAL NOT NULL
+);
+"""
 
-# Потолок на размер словаря: защита от распылённого обхода с тысяч адресов,
-# который иначе съел бы память процесса.
-_MAX_VISITORS = 50_000
+
+def _connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(settings.PDF_GUARD_DB, timeout=5)
+    # WAL + busy_timeout: воркеры пишут в один файл, и без этого второй
+    # получал бы "database is locked" вместо записи.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.executescript(_SCHEMA)
+    return conn
 
 
 def reader_ip(request: Request) -> str | None:
@@ -103,17 +125,43 @@ async def is_search_engine(ip: str, user_agent: str | None) -> bool:
     return verdict
 
 
-def _prune(now: float, window: float) -> None:
-    for ip in list(_visitors):
-        state = _visitors[ip]
-        if state.get("banned_until", 0) > now:
-            continue
-        files = {k: t for k, t in state["files"].items() if now - t < window}
-        if files:
-            state["files"] = files
-            state.pop("banned_until", None)
-        else:
-            _visitors.pop(ip, None)
+def _record(ip: str, file_key: str, limit: int, window: float, ban: int) -> int | None:
+    """Синхронная часть: учёт выдачи в общем для воркеров SQLite."""
+    now = time.time()
+    conn = _connect()
+    # `with conn` фиксирует транзакцию, но НЕ закрывает соединение — закрываем
+    # руками, иначе на каждой выдаче течёт файловый дескриптор.
+    try:
+        with conn:
+            conn.execute("DELETE FROM downloads WHERE at < ?", (now - window,))
+            conn.execute("DELETE FROM bans WHERE until <= ?", (now,))
+
+            row = conn.execute("SELECT until FROM bans WHERE ip = ?", (ip,)).fetchone()
+            if row:
+                return int(row[0] - now) + 1
+
+            # Тот же файл в пределах окна: Range-запросы просмотрщика,
+            # перезагрузка страницы, повторное открытие — одна выдача.
+            conn.execute(
+                "INSERT INTO downloads (ip, file_key, at) VALUES (?, ?, ?) "
+                "ON CONFLICT (ip, file_key) DO UPDATE SET at = excluded.at",
+                (ip, file_key, now),
+            )
+            # Старые строки уже удалены выше, поэтому COUNT(*) — это и есть
+            # число разных файлов, забранных за окно.
+            distinct = conn.execute(
+                "SELECT COUNT(*) FROM downloads WHERE ip = ?", (ip,)
+            ).fetchone()[0]
+            if distinct > limit:
+                conn.execute(
+                    "INSERT INTO bans (ip, until) VALUES (?, ?) "
+                    "ON CONFLICT (ip) DO UPDATE SET until = excluded.until",
+                    (ip, now + ban),
+                )
+                return ban
+    finally:
+        conn.close()
+    return None
 
 
 async def check_download(request: Request, file_key: str) -> int | None:
@@ -132,38 +180,29 @@ async def check_download(request: Request, file_key: str) -> int | None:
     if await is_search_engine(ip, request.headers.get("user-agent")):
         return None
 
-    now = time.time()
-    window = float(settings.PDF_RATE_WINDOW_SECONDS)
-    _prune(now, window)
-
-    state = _visitors.get(ip)
-    if state is None:
-        if len(_visitors) >= _MAX_VISITORS:
-            # Словарь переполнен — считать перестаём, но и не баним: лучше
-            # пропустить обход, чем закрыть сайт живым читателям.
-            return None
-        state = {"files": {}}
-        _visitors[ip] = state
-
-    banned_until = state.get("banned_until", 0)
-    if banned_until > now:
-        return int(banned_until - now) + 1
-
-    if file_key in state["files"]:
-        # Тот же файл в пределах окна: Range-запросы просмотрщика, перезагрузка
-        # страницы, повторное открытие — всё это одна выдача.
-        state["files"][file_key] = now
+    try:
+        return await asyncio.to_thread(
+            _record,
+            ip,
+            file_key,
+            limit,
+            float(settings.PDF_RATE_WINDOW_SECONDS),
+            settings.PDF_BAN_SECONDS,
+        )
+    except sqlite3.Error:
+        # Счётчик сломался — раздачу это останавливать не должно: пропустить
+        # обход хуже, чем закрыть сайт живым читателям, но ненамного, а вот
+        # уронить 500 на каждом PDF — точно хуже обоих.
         return None
-
-    state["files"][file_key] = now
-    if len(state["files"]) > limit:
-        ban = settings.PDF_BAN_SECONDS
-        state["banned_until"] = now + ban
-        return ban
-    return None
 
 
 def reset() -> None:
     """Сбросить состояние — для тестов."""
-    _visitors.clear()
     _bot_cache.clear()
+    conn = _connect()
+    try:
+        with conn:
+            conn.execute("DELETE FROM downloads")
+            conn.execute("DELETE FROM bans")
+    finally:
+        conn.close()

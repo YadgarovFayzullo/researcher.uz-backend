@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 
 from src.core import pdf_guard
 from src.core.config import settings
@@ -47,6 +48,8 @@ def download(req, key):
 settings.PDF_RATE_LIMIT = 3
 settings.PDF_BAN_SECONDS = 900
 settings.PDF_PROXY_SECRET = "s3cret"
+# Счётчик общий для воркеров и лежит на диске — тесту нужен свой файл.
+settings.PDF_GUARD_DB = tempfile.mktemp(suffix="-pdf-guard.sqlite3")
 
 pdf_guard.reset()
 req = FakeRequest()
