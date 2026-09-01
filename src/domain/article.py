@@ -1,6 +1,7 @@
 """Статьи, standalone-публикации и доклады конференций (`articles`)."""
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Sequence
@@ -28,6 +29,16 @@ from src.schemas.article import ArticleCreate, ArticleUpdate
 _HEAVY = HEAVY_ARTICLE_COLUMNS
 # Для списков дополнительно режем тяжёлый текст, который в каталогах не виден.
 _LIST_EXCLUDE = _HEAVY + ("annotation_foreign", "keywords_foreign")
+
+# Числовой хвост слага («-106415»): при переезде на свой бэкенд он
+# пересчитался, поэтому старый и новый адрес сравниваются без него.
+_SLUG_TAIL = re.compile(r"-\d+$")
+
+
+def _slug_stem(slug: str) -> str:
+    """Слаг без числового хвоста: 'nazariya-106415' → 'nazariya'."""
+    return _SLUG_TAIL.sub("", slug or "")
+
 
 _SORTABLE = {
     "created_at": Article.created_at,
@@ -378,32 +389,36 @@ class ArticleDomain:
     ) -> str | None:
         """Старый слаг → актуальный, если он однозначно определяется.
 
-        Слаг устроен как «<из-заголовка>-<6 цифр>», где хвост — это время
-        создания. При переезде на свой бэкенд заголовочная часть сохранилась,
-        а хвост сгенерировался заново, и все проиндексированные адреса стали
-        404. Ищем статью с той же заголовочной частью.
+        Слаг устроен как «<из-заголовка>[-<цифры>]»: числовой хвост появляется
+        только при коллизии заголовков. При переезде на свой бэкенд
+        заголовочная часть сохранилась, а хвост пересчитался — где-то пропал,
+        где-то появился, где-то сменился, и все проиндексированные адреса стали
+        404. Поэтому сравниваем ОСНОВЫ (слаг без числового хвоста), а не пару
+        «префикс + обязательный хвост»: иначе `...-imkoniyatlari-106415` не
+        находил статью со слагом `...-imkoniyatlari` — самый частый случай,
+        ведь у большинства импортированных статей хвоста нет вовсе.
 
         Возвращаем результат ТОЛЬКО когда кандидат ровно один: заголовки в базе
         повторяются (одна статья в разных выпусках), и увести читателя не на ту
         статью хуже, чем честно отдать 404.
         """
-        prefix, _, tail = slug.rpartition("-")
-        # Хвост должен быть похож на сгенерированный суффикс, иначе это
-        # обычный слаг, а не старый адрес.
-        if not prefix or not tail.isdigit():
+        stem = _slug_stem(slug)
+        if not stem:
             return None
 
+        # Кандидаты: сама основа (хвост потерялся) и всё, что с хвостом.
         rows = (
             await db.execute(
                 select(Article.slug)
-                .where(Article.slug.like(f"{prefix}-%"))
+                .where(or_(Article.slug == stem, Article.slug.like(f"{stem}-%")))
                 .where(Article.published.is_(True))
                 .limit(10)
             )
         ).scalars().all()
 
-        # LIKE «prefix-%» цепляет и более длинные слаги, поэтому сверяем точно.
-        exact = [s for s in rows if s.rpartition("-")[0] == prefix and s != slug]
+        # LIKE «stem-%» цепляет и более длинные слаги («stem-drugaia-statia»),
+        # поэтому сверяем основы точно.
+        exact = [s for s in rows if _slug_stem(s) == stem and s != slug]
         return exact[0] if len(exact) == 1 else None
 
     async def get_article_by_id(self, db: AsyncSession, id: int) -> Article | None:
