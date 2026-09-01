@@ -76,6 +76,26 @@ class Settings(BaseSettings):
     # только адресу сокета.
     PDF_PROXY_SECRET: str | None = None
 
+    # --- OAI-PMH (выдача метаданных партнёрам: EBSCO, BASE, DOAJ) ---
+    # Эндпоинт /oai закрыт ключом из таблицы oai_clients — публичного доступа
+    # нет вообще, поэтому «выключателя» здесь нет: нет выданных ключей = никто
+    # ничего не заберёт.
+    OAI_REPOSITORY_NAME: str = "researcher.uz"
+    OAI_ADMIN_EMAIL: str = "info@researcher.uz"
+    # Часть идентификатора oai:<namespace>:article/<id>. Менять нельзя после
+    # первой выдачи наружу: харвестер узнаёт записи именно по этой строке.
+    OAI_NAMESPACE: str = "researcher.uz"
+    # baseURL, который мы объявляем в ответах. Пусто — берём из самого запроса.
+    OAI_BASE_URL: str | None = None
+    # Размер страницы выдачи. Заодно ограничивает темп выкачки: 100 записей за
+    # запрос при лимите OAI_RATE_LIMIT.
+    OAI_PAGE_SIZE: int = 100
+    # Сколько живёт resumptionToken (сек). Дольше суток харвестеру не нужно, а
+    # протухший токен заставит его начать заново — это штатное поведение.
+    OAI_TOKEN_TTL_SECONDS: int = 86400
+    # Лимит запросов к /oai с одного IP (формат slowapi).
+    OAI_RATE_LIMIT: str = "60/minute"
+
     # --- Cloudflare R2 (Storage, Фаза 6) — S3-совместимо ---
     R2_ACCOUNT_ID: str | None = None
     R2_ACCESS_KEY_ID: str | None = None

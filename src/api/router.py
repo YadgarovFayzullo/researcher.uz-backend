@@ -23,6 +23,7 @@ from src.api.v1 import (
     security,
     imports,
     plagiarism,
+    oai,
 )
 
 api_router = APIRouter()
@@ -71,3 +72,8 @@ api_router.include_router(security.router, prefix="/security", tags=["security"]
 api_router.include_router(imports.router, prefix="/import", tags=["import"])
 # Проверка на заимствования по базе платформы.
 api_router.include_router(plagiarism.router, prefix="/plagiarism", tags=["plagiarism"])
+
+# OAI-PMH: выдача метаданных партнёрам-агрегаторам. Не публичный эндпоинт —
+# закрыт ключом из oai_clients (src/core/oai_access.py), поэтому и prefix
+# короткий: baseURL партнёру даётся как https://api.researcher.uz/oai.
+api_router.include_router(oai.router, prefix="/oai", tags=["oai"])

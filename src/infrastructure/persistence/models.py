@@ -316,6 +316,12 @@ class Article(Base):
 
     id = Column(BigInteger, Identity(always=True), primary_key=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    # Датировка записи для OAI-PMH. Двигается триггером articles_touch_updated_at
+    # и ТОЛЬКО при правке библиографических полей — счётчики просмотров пишутся
+    # в эту же строку на каждый просмотр и дату менять не должны.
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
     title = Column(Text, nullable=True)
     title_foreign = Column(Text, nullable=True)
@@ -736,3 +742,39 @@ class PlagiarismMatch(Base):
     spans = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
 
     check = relationship("PlagiarismCheck", back_populates="matches")
+
+
+# ---------------------------------------------------------------------------
+# OAI-PMH: реестр допущенных харвестеров
+# ---------------------------------------------------------------------------
+
+class OaiClient(Base):
+    """Клиент, которому разрешено забирать метаданные через /oai.
+
+    Эндпоинт закрыт: без действующего ключа — 401. Ключ хранится только хешем,
+    выдаётся и отзывается через scripts/oai_client.py.
+    """
+
+    __tablename__ = "oai_clients"
+
+    id = Column(BigInteger, Identity(always=True), primary_key=True)
+    name = Column(Text, nullable=False)
+    token_hash = Column(Text, nullable=False, unique=True)
+    enabled = Column(Boolean, nullable=False, server_default=text("true"))
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    # Пусто = без ограничения по адресу. Иначе список IP/CIDR.
+    ip_allowlist = Column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
+    # Пусто = все журналы. Иначе клиент видит только перечисленные.
+    allowed_journal_ids = Column(
+        ARRAY(BigInteger), nullable=False, server_default=text("'{}'::bigint[]")
+    )
+    include_fulltext = Column(Boolean, nullable=False, server_default=text("false"))
+    notes = Column(Text, nullable=True)
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    last_seen_ip = Column(Text, nullable=True)
+    requests_count = Column(BigInteger, nullable=False, server_default=text("0"))
