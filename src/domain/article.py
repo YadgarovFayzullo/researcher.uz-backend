@@ -280,6 +280,39 @@ class ArticleDomain:
         stmt = self._apply_filters(select(func.count(Article.id)), **filters)
         return int((await db.execute(stmt)).scalar_one())
 
+    async def sitemap_rows(self, db: AsyncSession) -> list[dict[str, Any]]:
+        """Слаг + дата каждой публичной статьи выпуска — вход для sitemap.xml.
+
+        Отдельный метод, потому что карта сайта — единственное место, где нужны
+        ВСЕ строки разом. Через обычный листинг фронт выгребал их страницами по
+        200 (33 последовательных запроса и мегабайты аннотаций на каждый вызов),
+        и sitemap упирался в таймаут Vercel — краулер получал 504. Здесь один
+        запрос и три колонки.
+
+        Фильтры те же, что у общей ленты (`_apply_filters`), поэтому демо-журнал
+        (`src/domain/demo.py`) в карту не попадает — запрос не адресный.
+        """
+        stmt = self._apply_filters(
+            select(Article.slug, Article.data, Article.created_at),
+            issue_id=None,
+            journal_id=None,
+            publisher_id=None,
+            admin_id=None,
+            section_id=None,
+            publication_type=None,
+            field_of_science=None,
+            published=True,
+            has_doi=None,
+            has_issue=True,
+            created_after=None,
+        ).where(Article.slug.isnot(None)).order_by(Article.id)
+
+        rows = (await db.execute(stmt)).all()
+        return [
+            {"slug": r.slug, "data": r.data, "created_at": r.created_at}
+            for r in rows
+        ]
+
     async def journal_facets(
         self, db: AsyncSession, journal_id: int
     ) -> dict[str, Any]:

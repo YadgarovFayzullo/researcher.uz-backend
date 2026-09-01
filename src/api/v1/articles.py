@@ -118,6 +118,21 @@ async def count_articles(
     return {"count": total}
 
 
+@router.get("/sitemap")
+async def sitemap_articles(response: Response, db: AsyncSession = Depends(get_db)):
+    """Слаги всех публичных статей выпусков — для `sitemap.xml` фронта.
+
+    Одним запросом и тремя колонками: обычным листингом карта сайта собиралась
+    33 страницами по 200 строк с аннотациями и упиралась в таймаут Vercel.
+    """
+    rows = await domain.sitemap_rows(db)
+    # Карта сайта меняется медленно, а дёргает её краулер — держим на CDN час.
+    response.headers["Cache-Control"] = (
+        "public, max-age=300, s-maxage=3600, stale-while-revalidate=86400"
+    )
+    return {"items": rows, "total": len(rows)}
+
+
 @router.get("/journal-facets")
 async def journal_facets(
     journal_id: int = Query(..., description="журнал, для которого нужны фасеты"),
