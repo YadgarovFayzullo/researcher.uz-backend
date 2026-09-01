@@ -105,3 +105,11 @@ class OaiParseRequest(BaseModel):
     date_from: str | None = None   # YYYY-MM-DD
     date_until: str | None = None
     resume: bool = False
+    # Глубокий разбор: заходить на страницу каждой статьи уже при обходе.
+    # None — решает домен (включает, когда в oai_dc нет дат, как у
+    # КиберЛенинки). Дорого: запрос на статью, зато год и выпуск известны
+    # до применения.
+    deep: bool | None = None
+    # Отобрать только статьи этого года публикации. Работает вместе с
+    # `deep`: год известен лишь со страницы статьи, а не из oai_dc.
+    year: int | None = None

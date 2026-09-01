@@ -278,6 +278,10 @@ async def start_oai_parse(
         params["from"] = body.date_from
     if body.date_until:
         params["until"] = body.date_until
+    if body.deep is not None:
+        params["deep"] = body.deep
+    if body.year is not None:
+        params["year"] = body.year
     job.params = params
     job.status = "parsing"
     job.error = None

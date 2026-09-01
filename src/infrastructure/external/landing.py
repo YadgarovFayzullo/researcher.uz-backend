@@ -31,6 +31,14 @@ _META = re.compile(
     r"""(?=[^>]*\bcontent\s*=\s*(?P<q>["'])(?P<value>.*?)(?P=q))[^>]*>""",
     re.IGNORECASE | re.DOTALL,
 )
+# Аннотация: Highwire-тега под неё нет, зато она почти всегда лежит в
+# og:description (проверено на КиберЛенинке, там это единственный источник
+# аннотации в разметке).
+_OG_DESCRIPTION = re.compile(
+    r"""<meta\s+(?=[^>]*\bproperty\s*=\s*["']og:description["'])"""
+    r"""(?=[^>]*\bcontent\s*=\s*(?P<q>["'])(?P<value>.*?)(?P=q))[^>]*>""",
+    re.IGNORECASE | re.DOTALL,
+)
 # Запасной путь: PDF-ссылка прямо в разметке (OJS зовёт её .../download/...).
 _DOWNLOAD_HREF = re.compile(
     r"""href\s*=\s*["'](?P<url>[^"']*/article/download/[^"']+)["']""", re.IGNORECASE
@@ -52,6 +60,7 @@ class LandingData:
     journal_title: str | None = None
     language: str | None = None
     keywords: list[str] = field(default_factory=list)
+    abstract: str | None = None
     pdf_url: str | None = None
 
     @property
@@ -85,6 +94,13 @@ def parse_landing_html(page: str, *, base_url: str) -> LandingData:
     data.journal_title = first("citation_journal_title")
     data.language = first("citation_language")
     data.keywords = tags.get("citation_keywords", [])
+
+    abstract = first("citation_abstract")
+    if not abstract:
+        match = _OG_DESCRIPTION.search(page)
+        if match:
+            abstract = html.unescape(match.group("value") or "").strip()
+    data.abstract = abstract or None
 
     pdf = first("citation_pdf_url")
     if not pdf:

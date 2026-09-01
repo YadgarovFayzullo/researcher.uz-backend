@@ -25,6 +25,7 @@ from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any, Sequence
 
 if TYPE_CHECKING:  # только для аннотаций — модуль тянет httpx, не нужный CSV-пути
+    from src.infrastructure.external.landing import LandingData
     from src.infrastructure.external.oai import OaiRecord
 
 from slugify import slugify
@@ -366,6 +367,43 @@ def parsed_from_oai(record: "OaiRecord") -> tuple[dict[str, Any], list[dict[str,
     return parsed, problems
 
 
+def merge_landing(parsed: dict[str, Any], landing: "LandingData") -> dict[str, Any]:
+    """Дополнить поля статьи тем, что нашлось на её странице у источника.
+
+    Заполняем ТОЛЬКО пустое: то, что клиент уже поправил руками в превью,
+    чужой сайт перебивать не должен.
+
+    Год здесь важнее остального: в `oai_dc` он есть не всегда (КиберЛенинка не
+    отдаёт ни даты, ни выпуска — только название, автора и ссылку), а без года
+    все статьи архива легли бы в один выпуск.
+    """
+    out = dict(parsed)
+    if not out.get("doi") and landing.doi:
+        out["doi"] = normalize_doi(landing.doi)
+    if not out.get("pages") and landing.pages:
+        out["pages"] = landing.pages
+    if not out.get("authors") and landing.authors:
+        out["authors"] = ", ".join(landing.authors)
+    if not out.get("volume") and landing.volume:
+        out["volume"] = landing.volume
+    if not out.get("issue") and landing.issue:
+        out["issue"] = landing.issue
+    if not out.get("annotation") and landing.abstract:
+        out["annotation"] = landing.abstract
+    if not out.get("keywords") and landing.keywords:
+        out["keywords"] = ", ".join(landing.keywords)
+    if not out.get("publication_year"):
+        year = parse_year(landing.date)
+        if year is not None and 1900 <= year <= date.today().year:
+            out["publication_year"] = year
+            # Та же осторожность, что в build_parsed: articles.data ограничена
+            # CHECK (data <= CURRENT_DATE), поэтому для текущего года дату не
+            # выдумываем.
+            if year < date.today().year:
+                out["data"] = date(year, 1, 1).isoformat()
+    return out
+
+
 def source_key_of(row: dict[str, Any], parsed: dict[str, Any]) -> str:
     """Ключ строки в источнике: DOI, если есть, иначе хеш названия и выпуска.
 
@@ -588,12 +626,49 @@ class ImportDomain:
                 )
             )
 
+        # Глубокий разбор: заходим на страницу каждой статьи уже сейчас.
+        # Нужен источникам, у которых в `oai_dc` нет ни дат, ни выпусков
+        # (КиберЛенинка отдаёт только название, автора и ссылку): без года все
+        # статьи легли бы в один выпуск, а отобрать нужный год в превью клиент
+        # бы не смог. По умолчанию включаем сами, когда дат нет ни у одной
+        # записи; `deep` в параметрах задачи переопределяет решение.
+        # Шаг дорогой — запрос на статью с паузой между обращениями к хосту,
+        # поэтому обычному OJS он не достаётся.
+        deep = params.get("deep")
+        if deep is None:
+            deep = not any(record.date for record in records)
+        want_year = parse_year(params.get("year"))
+        landing_failed = 0
+        skipped_by_year = 0
+        if deep:
+            kept: list[ImportItem] = []
+            for item in items:
+                if not await self._fill_item_from_landing(item):
+                    landing_failed += 1
+                year = (item.parsed or {}).get("publication_year")
+                # Отбор по году: год известен только со страницы статьи,
+                # поэтому фильтруем здесь, а не запросом к репозиторию.
+                if want_year is not None and year != want_year:
+                    skipped_by_year += 1
+                    continue
+                kept.append(item)
+            items = kept
+
         db.add_all(items)
         # Токен продолжения храним в задаче: он и есть закладка в чужом архиве.
         job.params = {
             **params,
             "resume_token": page.resume_token,
             "total_in_repository": page.total_in_repository,
+            # Итоги последнего обхода: без них клиент не поймёт, куда делись
+            # записи, отброшенные фильтром года.
+            "scan": {
+                "records": len(records),
+                "kept": len(items),
+                "skipped_by_year": skipped_by_year,
+                "landing_failed": landing_failed,
+                "deep": bool(deep),
+            },
         }
         job.status = "parsing"
         await db.commit()
@@ -603,6 +678,36 @@ class ImportDomain:
             "skipped_in_file": len(records) - len(items),
             "unknown_columns": [],
         }
+
+    async def _fill_item_from_landing(self, item: ImportItem) -> bool:
+        """Дозаполнить кандидата со страницы статьи. False — страница не далась.
+
+        PDF здесь не трогаем: файл качается при применении, только для статей,
+        которые клиент действительно импортирует.
+        """
+        from src.infrastructure.external.landing import fetch_landing
+        from src.infrastructure.external.safe_fetch import FetchError
+
+        parsed = dict(item.parsed or {})
+        landing_url = parsed.get("landing_url") or item.pdf_source
+        if not landing_url:
+            return False
+        try:
+            landing = await fetch_landing(landing_url)
+        except FetchError as e:
+            item.problems = [
+                *(item.problems or []),
+                {"field": "", "code": "landing_failed", "message": f"Страница статьи недоступна: {e}"},
+            ]
+            return False
+
+        item.parsed = merge_landing(parsed, landing)
+        item.issue_key = issue_key_of(
+            item.parsed.get("publication_year"),
+            item.parsed.get("volume"),
+            item.parsed.get("issue"),
+        )
+        return True
 
     async def revalidate(self, db: AsyncSession, job: ImportJob) -> None:
         """Пересчитать дубликаты и сводку. Дёшево — идёт после каждой правки."""
@@ -826,18 +931,7 @@ class ImportDomain:
             item.problems = problems
             return
 
-        # Заполняем только пустое: то, что клиент уже поправил руками в превью,
-        # чужой сайт перебивать не должен.
-        if not parsed.get("doi") and landing.doi:
-            parsed["doi"] = normalize_doi(landing.doi)
-        if not parsed.get("pages") and landing.pages:
-            parsed["pages"] = landing.pages
-        if not parsed.get("authors") and landing.authors:
-            parsed["authors"] = ", ".join(landing.authors)
-        if not parsed.get("volume") and landing.volume:
-            parsed["volume"] = landing.volume
-        if not parsed.get("issue") and landing.issue:
-            parsed["issue"] = landing.issue
+        parsed = merge_landing(parsed, landing)
         item.parsed = parsed
         item.issue_key = issue_key_of(
             parsed.get("publication_year"), parsed.get("volume"), parsed.get("issue")
