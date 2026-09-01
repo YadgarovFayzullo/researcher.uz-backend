@@ -638,19 +638,26 @@ class ImportDomain:
         if deep is None:
             deep = not any(record.date for record in records)
         want_year = parse_year(params.get("year"))
+        want_journal = normalize_title(params.get("journal_title") or "") or None
         landing_failed = 0
         skipped_by_year = 0
+        skipped_by_journal = 0
         if deep:
             kept: list[ImportItem] = []
             for item in items:
                 if not await self._fill_item_from_landing(item):
                     landing_failed += 1
-                year = (item.parsed or {}).get("publication_year")
+                parsed_item = item.parsed or {}
                 # Отбор по году: год известен только со страницы статьи,
                 # поэтому фильтруем здесь, а не запросом к репозиторию.
-                if want_year is not None and year != want_year:
+                if want_year is not None and parsed_item.get("publication_year") != want_year:
                     skipped_by_year += 1
                     continue
+                if want_journal:
+                    source_journal = normalize_title(parsed_item.get("source_journal") or "")
+                    if source_journal and source_journal != want_journal:
+                        skipped_by_journal += 1
+                        continue
                 kept.append(item)
             items = kept
 
@@ -666,6 +673,7 @@ class ImportDomain:
                 "records": len(records),
                 "kept": len(items),
                 "skipped_by_year": skipped_by_year,
+                "skipped_by_journal": skipped_by_journal,
                 "landing_failed": landing_failed,
                 "deep": bool(deep),
             },
@@ -702,6 +710,11 @@ class ImportDomain:
             return False
 
         item.parsed = merge_landing(parsed, landing)
+        # Название журнала у источника: набор OAI бывает шире самого журнала
+        # (в наборе КиберЛенинки записей больше, чем статей на карточке
+        # журнала), и без этой проверки в журнал приехало бы чужое.
+        if landing.journal_title:
+            item.parsed["source_journal"] = landing.journal_title
         item.issue_key = issue_key_of(
             item.parsed.get("publication_year"),
             item.parsed.get("volume"),

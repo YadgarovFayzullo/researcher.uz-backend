@@ -282,6 +282,8 @@ async def start_oai_parse(
         params["deep"] = body.deep
     if body.year is not None:
         params["year"] = body.year
+    if body.journal_title:
+        params["journal_title"] = body.journal_title
     job.params = params
     job.status = "parsing"
     job.error = None

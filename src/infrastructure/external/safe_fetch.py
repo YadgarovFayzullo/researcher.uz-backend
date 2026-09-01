@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import os
 import socket
 import time
 from dataclasses import dataclass
@@ -30,8 +31,13 @@ import httpx
 USER_AGENT = "researcher.uz importer/1.0 (+https://researcher.uz; import@researcher.uz)"
 
 # Пауза между обращениями к одному хосту. OJS-сайты небольших журналов живут на
-# слабом хостинге — пачка параллельных запросов кладёт их и нас заодно банят.
-MIN_INTERVAL_SECONDS = 1.0
+# слабом хостинге — пачка параллельных запросов кладёт их и нас заодно банят
+# (inlibrary.uz закрыл нам доступ на сутки ровно за это).
+#
+# По умолчанию секунда, но для разового прогона по согласованному архиву паузу
+# можно сжать через IMPORT_MIN_INTERVAL: 429 и 5xx всё равно отрабатываются
+# повтором с растущей задержкой, так что сервер сам себя защитит.
+MIN_INTERVAL_SECONDS = float(os.environ.get("IMPORT_MIN_INTERVAL", "1.0"))
 DEFAULT_TIMEOUT = 30.0
 MAX_REDIRECTS = 5
 

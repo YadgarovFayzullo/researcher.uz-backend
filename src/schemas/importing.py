@@ -113,3 +113,6 @@ class OaiParseRequest(BaseModel):
     # Отобрать только статьи этого года публикации. Работает вместе с
     # `deep`: год известен лишь со страницы статьи, а не из oai_dc.
     year: int | None = None
+    # Оставить только статьи этого журнала (сверяется с citation_journal_title
+    # на странице статьи): набор OAI бывает шире самого журнала.
+    journal_title: str | None = None
