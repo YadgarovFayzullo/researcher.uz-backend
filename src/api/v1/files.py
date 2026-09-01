@@ -124,6 +124,24 @@ async def serve_pdf(filename: str, request: Request, db: AsyncSession = Depends(
 
     # Снятая с публикации статья не должна раздавать и PDF.
     article = await domain.get_article_by_slug(db, slug, published_only=True)
+
+    # Старый адрес? В Google Scholar проиндексирован полный текст по слагу
+    # ДО переезда на свой бэкенд («<из-заголовка>-<цифры>»), а слаги при
+    # переезде пересчитались — такие ссылки отдавали 404, и Scholar терял
+    # полный текст. Резолвим старый слаг тем же механизмом, что и страница
+    # статьи (однозначное совпадение основы, иначе честный 404).
+    #
+    # Отдаём файл прямо по старому адресу, а не 301: страничный прокси
+    # (`src/app/pdf/[filename]/route.ts`) редиректы всё равно проходит сам,
+    # так что наружу это не видно, а Scholar получает 200 по тому адресу,
+    # который у него в индексе.
+    if not article:
+        target = await domain.resolve_legacy_slug(db, slug)
+        if target:
+            article = await domain.get_article_by_slug(db, target, published_only=True)
+            if article:
+                safe_slug = _SAFE_SLUG.sub("", target)
+
     if not article or not article.pdf:
         return Response("Not found", status_code=404)
 
