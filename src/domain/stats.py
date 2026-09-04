@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import and_, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.domain.demo import article_is_not_demo
 from src.infrastructure.persistence.models import (
     Article,
     ArticleInteraction,
@@ -243,13 +244,20 @@ class StatsDomain:
 
     @staticmethod
     async def get_platform_stats(db: AsyncSession) -> dict:
-        """Порт get_platform_stats(): {totalViews, totalDownloads} по всей платформе."""
+        """Порт get_platform_stats(): {totalViews, totalDownloads} по всей платформе.
+
+        Демо-журналы (`src/domain/demo.py`) из суммы исключены. Цифра уходит на
+        главную, а стендам статистику набивает `scripts/seed_demo_stats.py` —
+        без фильтра сотни выдуманных просмотров показывались бы как настоящие.
+        Заодно две цифры одного блока начинают считаться по одному правилу:
+        счётчик статей рядом демо уже не видит (`ArticleDomain._apply_filters`).
+        """
         row = (
             await db.execute(
                 select(
                     func.coalesce(func.sum(Article.views_count), 0).label("v"),
                     func.coalesce(func.sum(Article.downloads_count), 0).label("d"),
-                )
+                ).where(article_is_not_demo())
             )
         ).one()
         return {"totalViews": int(row.v), "totalDownloads": int(row.d)}
