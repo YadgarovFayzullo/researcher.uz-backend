@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 import re
@@ -126,12 +127,32 @@ class ResearcherDomain:
         await db.commit()
 
     # ------------------------------------------------------------------ #
-    async def _orcid_and_name(self, db: AsyncSession, user_id) -> tuple[str, str]:
+    async def _author_identity(
+        self, db: AsyncSession, user_id
+    ) -> tuple[str | None, str]:
+        """ORCID (если привязан) и имя для строки автора.
+
+        ORCID здесь перестал быть обязательным: профиль есть у любого
+        зарегистрированного, в том числе вошедшего через Google, и прицепить
+        свою статью он должен мочь без iD — связь тогда держит только
+        `article_authors.profile_id`, по нему же собирается его страница.
+        """
         prof = await self._profile(db, user_id)
-        if not prof.orcid_id:
-            raise CabinetError("no ORCID linked")
         name = (prof.full_name or "").strip() or "Автор"
-        return prof.orcid_id, name
+        return (prof.orcid_id or None), name
+
+    @staticmethod
+    def _claimed_by(user_id, orcid: str | None):
+        """Условие «строка автора уже принадлежит этому профилю».
+
+        Сравнение по ORCID подмешиваем, только когда он есть: `orcid == None`
+        SQLAlchemy разворачивает в `orcid IS NULL`, и условие совпало бы с
+        любым автором без iD — чужая статья считалась бы уже привязанной.
+        """
+        cond = ArticleAuthor.profile_id == user_id
+        if orcid:
+            cond = cond | (ArticleAuthor.orcid == orcid)
+        return cond
 
     async def _next_author_order(self, db: AsyncSession, article_id: int) -> int:
         # coalesce(max(author_order) + 1, 0)
@@ -146,7 +167,7 @@ class ResearcherDomain:
 
     async def claim_article(self, db: AsyncSession, *, user_id, article_id: int) -> None:
         """Порт claim_article: привязать статью к профилю (idempotent)."""
-        v_orcid, v_name = await self._orcid_and_name(db, user_id)
+        v_orcid, v_name = await self._author_identity(db, user_id)
 
         exists_article = (
             await db.execute(select(Article.id).where(Article.id == article_id))
@@ -159,8 +180,7 @@ class ResearcherDomain:
             await db.execute(
                 select(ArticleAuthor.id).where(
                     ArticleAuthor.article_id == article_id,
-                    (ArticleAuthor.profile_id == user_id)
-                    | (ArticleAuthor.orcid == v_orcid),
+                    self._claimed_by(user_id, v_orcid),
                 )
             )
         ).scalars().first()
@@ -197,7 +217,7 @@ class ResearcherDomain:
         self, db: AsyncSession, *, user_id, dois: list[str]
     ) -> int:
         """Порт claim_articles_by_dois: bulk-привязка по DOI. Возвращает число новых."""
-        v_orcid, v_name = await self._orcid_and_name(db, user_id)
+        v_orcid, v_name = await self._author_identity(db, user_id)
         wanted = {d for d in (_norm_doi(x) for x in (dois or [])) if d}
         if not wanted:
             return 0
@@ -220,8 +240,7 @@ class ResearcherDomain:
                 await db.execute(
                     select(ArticleAuthor.id).where(
                         ArticleAuthor.article_id == aid,
-                        (ArticleAuthor.profile_id == user_id)
-                        | (ArticleAuthor.orcid == v_orcid),
+                        self._claimed_by(user_id, v_orcid),
                     )
                 )
             ).scalars().first()
@@ -309,6 +328,50 @@ class ResearcherDomain:
                     Profile.bio,
                     Profile.education,
                 ).where(Profile.orcid_id == orcid)
+            )
+        ).first()
+        if row is None:
+            return None
+        return {
+            "full_name": row.full_name,
+            "orcid": row.orcid_id,
+            "avatar_url": row.avatar_url,
+            "workplace": row.workplace,
+            "country": row.country,
+            "bio": row.bio,
+            "education": row.education,
+        }
+
+    async def get_profile_by_user_id(
+        self, db: AsyncSession, user_id: str) -> dict | None:
+        """Та же публичная карточка, но по id аккаунта — для тех, у кого ORCID нет.
+
+        Профиль заводится при любой регистрации (см. `AuthDomain.
+        get_or_create_oauth_user`), а вот адресовать его было нечем: публичная
+        страница ходила только по ORCID, и вошедший через Google упирался в
+        «профиля нет». Поля и их набор — как в `get_researcher_profile`, чтобы
+        страница отрисовала обе карточки одним компонентом.
+
+        `is_public = false` прячет карточку (404): флаг для того и заведён, а на
+        ORCID-странице он не проверяется только потому, что там адрес и так
+        знает лишь владелец iD.
+        """
+        try:
+            uid = uuid.UUID(str(user_id))
+        except (TypeError, ValueError):
+            return None
+
+        row = (
+            await db.execute(
+                select(
+                    Profile.full_name,
+                    Profile.orcid_id,
+                    Profile.avatar_url,
+                    Profile.workplace,
+                    Profile.country,
+                    Profile.bio,
+                    Profile.education,
+                ).where(Profile.id == uid, Profile.is_public.isnot(False))
             )
         ).first()
         if row is None:

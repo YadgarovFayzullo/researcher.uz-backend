@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from sqlalchemy import case, delete, func, select
@@ -133,6 +134,26 @@ class AuthorDomain:
     ) -> list[dict[str, Any]]:
         """Публикации автора по ORCID — форма AUTHOR_ARTICLE_SELECT фронта
         (статья + название журнала через issues -> journals)."""
+        return await self._publications(db, ArticleAuthor.orcid == orcid)
+
+    async def list_publications_by_profile(
+        self, db: AsyncSession, profile_id: str
+    ) -> list[dict[str, Any]]:
+        """То же, но по владельцу профиля, а не по ORCID.
+
+        Нужна страницам исследователей без ORCID (регистрация через Google):
+        связь со статьёй у них держится не идентификатором, а привязкой
+        `article_authors.profile_id`, которую ставит claim в кабинете.
+        """
+        try:
+            uid = uuid.UUID(str(profile_id))
+        except (TypeError, ValueError):
+            return []
+        return await self._publications(db, ArticleAuthor.profile_id == uid)
+
+    async def _publications(
+        self, db: AsyncSession, where: Any
+    ) -> list[dict[str, Any]]:
         res = await db.execute(
             select(
                 ArticleAuthor.author_name,
@@ -150,7 +171,7 @@ class AuthorDomain:
             .join(Article, Article.id == ArticleAuthor.article_id)
             .outerjoin(Issue, Issue.id == Article.issue_id)
             .outerjoin(Journal, Journal.id == Issue.journal_id)
-            .where(ArticleAuthor.orcid == orcid)
+            .where(where)
             .order_by(Article.data.desc().nullslast(), Article.id.desc())
         )
         return [

@@ -1,6 +1,8 @@
 """Кабинет исследователя — эндпоинты (Фаза 5, порт researcher_cabinet.sql).
 
-Публичное: GET /researcher/{orcid} (карточка + внешние работы).
+Публичное: GET /researcher/{orcid} (карточка + внешние работы) и то же самое по
+id аккаунта — GET /researcher/u/{user_id} — для профилей без ORCID (регистрация
+через Google).
 Под сессией: обновить профиль, claim/unclaim статей, импорт работ ORCID.
 Личность берётся из get_current_profile (JWT), сервис действует только над своим
 профилем — как SECURITY DEFINER + auth.uid() в SQL.
@@ -39,6 +41,34 @@ def _bad(err: CabinetError) -> HTTPException:
 
 
 # ------------------------------- public --------------------------------- #
+# Объявлены ДО /{orcid}: литерал "u" в первом сегменте иначе читался бы как iD.
+@router.get("/u/{user_id}", response_model=ResearcherPageResponse)
+async def researcher_page_by_user(user_id: str, db: AsyncSession = Depends(get_db)):
+    """Карточка исследователя по id аккаунта — адрес для профиля без ORCID.
+
+    Если ORCID у профиля всё-таки есть, отдаём и его внешние работы: страница
+    по такому адресу должна показывать то же, что и /researcher/{orcid}.
+    """
+    profile = await domain.get_profile_by_user_id(db, user_id)
+    if profile is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Researcher not found")
+    orcid = profile.get("orcid")
+    works = await domain.list_researcher_works(db, orcid) if orcid else []
+    return {"profile": profile, "works": works}
+
+
+@router.get("/u/{user_id}/publications")
+async def researcher_publications_by_user(
+    user_id: str, db: AsyncSession = Depends(get_db)
+):
+    """Публикации, привязанные к этому профилю (claim в кабинете).
+
+    Аналог /{orcid}/publications для тех, у кого ORCID нет: там связь идёт по
+    `article_authors.orcid`, здесь — по `article_authors.profile_id`.
+    """
+    return await _authors.list_publications_by_profile(db, user_id)
+
+
 @router.get("/{orcid}", response_model=ResearcherPageResponse)
 async def researcher_page(orcid: str, db: AsyncSession = Depends(get_db)):
     profile = await domain.get_researcher_profile(db, orcid)
