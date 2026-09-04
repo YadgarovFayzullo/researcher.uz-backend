@@ -23,11 +23,16 @@ class IssueDomain:
         journal_id: int | None = None,
         year: int | None = None,
         with_counts: bool = True,
+        include_blocked: bool = True,
     ) -> list[dict[str, Any]]:
         """Выпуски (опц. одного журнала/года) + число статей в каждом.
 
         Счётчик — коррелированный подзапрос вместо GROUP BY: выпуски без статей
         должны отдаваться с нулём, а не пропадать (это `articles(count)` фронта).
+
+        `include_blocked=False` прячет погашенные модерацией выпуски — так их
+        не видит публичная страница журнала. Админке они нужны (там их и
+        разблокируют), поэтому по умолчанию отдаём всё.
         """
         count_sq = (
             select(func.count(Article.id))
@@ -41,6 +46,8 @@ class IssueDomain:
             stmt = stmt.where(Issue.journal_id == journal_id)
         if year is not None:
             stmt = stmt.where(Issue.year == year)
+        if not include_blocked:
+            stmt = stmt.where(~Issue.meta.has_key("blocked"))  # noqa: W601
         # created_at desc — порядок JournalInfo/JournalPage.
         stmt = stmt.order_by(Issue.created_at.desc().nullslast(), Issue.id.desc())
 

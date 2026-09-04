@@ -3,8 +3,11 @@ import logging
 from fastapi import BackgroundTasks, Depends, APIRouter, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.ext.asyncio import AsyncSession
-from src.api.deps import get_current_profile
+from pydantic import BaseModel, Field
+
+from src.api.deps import get_current_profile, require_owner
 from src.domain.authz import can_write_article
+from src.domain import moderation
 from src.infrastructure.persistence.db import get_db
 from src.infrastructure.persistence.models import Profile
 from src.schemas.article import ArticleCreate, ArticleUpdate
@@ -148,3 +151,47 @@ async def delete_article(
     if not deleted:
         raise HTTPException(status_code=404, detail="Article not found")
     return {"status": "deleted"}
+
+
+class TakedownRequest(BaseModel):
+    """Причина обязательна: снятие гасит весь выпуск, и через полгода никто не
+    вспомнит, за что именно, если не записать."""
+
+    reason: str = Field(min_length=3, max_length=500)
+
+
+@router.post("/{id}/takedown")
+async def takedown_article(
+    id: int,
+    body: TakedownRequest,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(require_owner),
+):
+    """Снять статью с публикации как нарушение и погасить её выпуск.
+
+    Только владелец: это санкция против редактора журнала, и сам редактор
+    отменить её не должен.
+    """
+    article = await domain.get_article_by_id(db, id)
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+    result = await moderation.takedown_article(
+        db, article, reason=body.reason, by=profile.id
+    )
+    return {"status": "taken_down", **result}
+
+
+@router.post("/{id}/restore")
+async def restore_article(
+    id: int,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(require_owner),
+):
+    """Убрать отметку нарушения со статьи. Публикацию и блокировку выпуска не
+    трогает — статья возвращается в ленты обычным сохранением формы, выпуск
+    открывается через `/issues/{id}/unblock`."""
+    article = await domain.get_article_by_id(db, id)
+    if not article:
+        raise HTTPException(status_code=404, detail="Article not found")
+    await moderation.restore_article(db, article)
+    return {"status": "restored", "article_id": id}

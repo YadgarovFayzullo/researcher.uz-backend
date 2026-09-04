@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import get_current_profile
+from src.api.deps import get_current_profile, require_owner
+from src.domain import moderation
 from src.domain.authz import can_write_issue
 from src.domain.issue import IssueDomain
 from src.infrastructure.persistence.db import get_db
@@ -34,9 +36,15 @@ async def _guard(db: AsyncSession, profile: Profile, journal_id) -> None:
 async def list_issues(
     journal_id: int | None = Query(None),
     year: int | None = Query(None),
+    include_blocked: bool = Query(
+        True,
+        description="Отдавать выпуски, погашенные модерацией. Публичные страницы шлют false",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
-    return await domain.list_issues(db, journal_id=journal_id, year=year)
+    return await domain.list_issues(
+        db, journal_id=journal_id, year=year, include_blocked=include_blocked
+    )
 
 
 @router.get("/years", response_model=list[int])
@@ -94,3 +102,46 @@ async def delete_issue(
     await _guard(db, profile, existing.journal_id)
     await domain.delete_issue(db, issue_id)
     return {"status": "deleted"}
+
+
+class BlockRequest(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+
+
+@router.post("/{issue_id}/block")
+async def block_issue(
+    issue_id: int,
+    body: BlockRequest,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(require_owner),
+):
+    """Погасить выпуск целиком: снять с публикации все его статьи.
+
+    Обычно вызывается сам, из takedown статьи; отдельная ручка нужна, когда
+    владелец забраковал весь номер, а не конкретную работу.
+    """
+    issue = await domain.get_issue(db, issue_id)
+    if not issue:
+        raise HTTPException(status_code=404, detail="Issue not found")
+    blocked = await moderation.block_issue(
+        db, issue, reason=body.reason, by=profile.id
+    )
+    return {"status": "blocked", "issue_id": issue_id, "blocked": blocked}
+
+
+@router.post("/{issue_id}/unblock")
+async def unblock_issue(
+    issue_id: int,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(require_owner),
+):
+    """Открыть выпуск и вернуть в публикацию то, что погасила блокировка.
+
+    Статьи с отметкой нарушения остаются снятыми — их возвращают руками,
+    поправив метаданные.
+    """
+    issue = await domain.get_issue(db, issue_id)
+    if not issue:
+        raise HTTPException(status_code=404, detail="Issue not found")
+    restored = await moderation.unblock_issue(db, issue)
+    return {"status": "unblocked", "issue_id": issue_id, "restored": restored}
