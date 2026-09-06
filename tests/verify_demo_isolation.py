@@ -16,9 +16,10 @@ from __future__ import annotations
 import asyncio
 import uuid
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
 from src.domain.article import ArticleDomain
+from src.domain.demo import journal_is_not_demo
 from src.domain.journal import JournalDomain
 from src.domain.stats import StatsDomain
 from src.infrastructure.persistence.db import AsyncSessionLocal
@@ -117,6 +118,24 @@ async def main() -> int:
         # ------------------------------------------- общие цифры платформы
         print("\n--- общие цифры ---")
         base = await StatsDomain.get_platform_stats(db)
+
+        # Счётчик выпусков на главной: настоящий выпуск в нём есть, демо — нет.
+        # Меряем разницей с тем же счётчиком без обоих фикстурных выпусков
+        # (по id, а не по названию: у выпусков платформы title часто NULL, а
+        # `NOT LIKE` от NULL даёт NULL и вырезал бы их из базы сравнения).
+        no_fixture = (
+            await db.execute(
+                select(func.count(Issue.id))
+                .join(Journal, Journal.id == Issue.journal_id)
+                .where(
+                    journal_is_not_demo(),
+                    Journal.type != "conference_series",
+                    ~Issue.meta.has_key("blocked"),  # noqa: W601
+                    Issue.id.notin_([i_real.id, i_demo.id]),
+                )
+            )
+        ).scalar_one()
+        check("демо-выпуск в счётчик главной не попадает", base["totalIssues"] - no_fixture, 1)
 
         a_demo.views_count = 900
         a_demo.downloads_count = 300

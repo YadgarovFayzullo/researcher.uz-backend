@@ -35,7 +35,7 @@ async def journals_overview(db: AsyncSession = Depends(get_db)):
 
 @router.get("/platform")
 async def platform_stats(db: AsyncSession = Depends(get_db)):
-    """get_platform_stats() — {totalViews, totalDownloads}."""
+    """get_platform_stats() — {totalViews, totalDownloads, totalIssues} без демо."""
     return await domain.get_platform_stats(db)
 
 

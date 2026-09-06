@@ -15,7 +15,7 @@ from typing import Any
 from sqlalchemy import and_, case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.domain.demo import article_is_not_demo
+from src.domain.demo import article_is_not_demo, journal_is_not_demo
 from src.infrastructure.persistence.models import (
     Article,
     ArticleInteraction,
@@ -244,13 +244,19 @@ class StatsDomain:
 
     @staticmethod
     async def get_platform_stats(db: AsyncSession) -> dict:
-        """Порт get_platform_stats(): {totalViews, totalDownloads} по всей платформе.
+        """Порт get_platform_stats(): {totalViews, totalDownloads, totalIssues}.
 
-        Демо-журналы (`src/domain/demo.py`) из суммы исключены. Цифра уходит на
+        Демо-журналы (`src/domain/demo.py`) из сумм исключены. Цифры уходят на
         главную, а стендам статистику набивает `scripts/seed_demo_stats.py` —
         без фильтра сотни выдуманных просмотров показывались бы как настоящие.
-        Заодно две цифры одного блока начинают считаться по одному правилу:
+        Заодно цифры одного блока начинают считаться по одному правилу:
         счётчик статей рядом демо уже не видит (`ArticleDomain._apply_filters`).
+
+        `totalIssues` — счётчик выпусков для первого экрана. Считается ЗДЕСЬ, а
+        не суммированием `get_journals_overview` на фронте: та ручка отдаёт
+        строку на каждый журнал, включая демо, и стенды уезжали бы в браузер.
+        Из счёта выпадают выпуски серий конференций (это тома трудов, не номера
+        журнала) и погашенные модерацией — публично их и так не видно.
         """
         row = (
             await db.execute(
@@ -260,7 +266,22 @@ class StatsDomain:
                 ).where(article_is_not_demo())
             )
         ).one()
-        return {"totalViews": int(row.v), "totalDownloads": int(row.d)}
+        issues = (
+            await db.execute(
+                select(func.count(Issue.id))
+                .join(Journal, Journal.id == Issue.journal_id)
+                .where(
+                    journal_is_not_demo(),
+                    Journal.type != "conference_series",
+                    ~Issue.meta.has_key("blocked"),  # noqa: W601
+                )
+            )
+        ).scalar_one()
+        return {
+            "totalViews": int(row.v),
+            "totalDownloads": int(row.d),
+            "totalIssues": int(issues),
+        }
 
     @staticmethod
     async def get_journal_analytics(
