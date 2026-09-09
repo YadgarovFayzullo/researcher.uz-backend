@@ -1,13 +1,16 @@
-from fastapi import Depends, APIRouter, Request
+from fastapi import Depends, APIRouter, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.infrastructure.persistence.db import get_db
+from src.api.deps import require_owner
 from src.core.bots import counts_as_human
 from src.domain.stats import StatsDomain
+from src.infrastructure.persistence.models import Profile
 from src.schemas.stats import (
     AddInteractionRequest,
     ArticleIdsRequest,
     ArticleStatsResponse,
     JournalIdsRequest,
+    LiveStatsResponse,
 )
 
 router = APIRouter()
@@ -55,6 +58,21 @@ async def daily_stats(body: JournalIdsRequest, db: AsyncSession = Depends(get_db
 
 
 # ------------------------------- мутации --------------------------------- #
+@router.get("/live", response_model=LiveStatsResponse)
+async def live_stats(
+    minutes: int = Query(60, ge=5, le=180),
+    db: AsyncSession = Depends(get_db),
+    _: Profile = Depends(require_owner),
+):
+    """Живая статистика платформы для owner-панели.
+
+    Owner-only намеренно: это сырой поток по всем журналам сразу, редактору
+    чужие издания видеть незачем (тот же принцип, что у /import и /plagiarism).
+    Маршрут объявлен ДО "/{article_id}", иначе "live" уехало бы в него как id.
+    """
+    return await domain.get_live(db, minutes=minutes)
+
+
 @router.post("/interaction")
 async def add_interaction(
     body: AddInteractionRequest, request: Request, db: AsyncSession = Depends(get_db)

@@ -420,6 +420,153 @@ class StatsDomain:
             for r in rows
         ]
 
+    # ============================ живая статистика =========================== #
+    # Часовой пояс площадки: Узбекистан, UTC+5 круглый год (перехода на летнее
+    # время нет), поэтому фиксированный offset, а не zoneinfo.
+    LOCAL_TZ = timezone(timedelta(hours=5))
+    # За сколько минут считаем «сейчас на сайте». Пять — компромисс: меньше
+    # даёт нули на спокойном трафике (у нас ~200 просмотров в СУТКИ), больше
+    # перестаёт быть «сейчас».
+    ACTIVE_WINDOW_MINUTES = 5
+
+    @staticmethod
+    async def get_live(db: AsyncSession, minutes: int = 60) -> dict:
+        """Живая статистика для owner-панели: минутные корзины, активные
+        читатели, итоги суток и лента последних событий.
+
+        Демо-журналы исключены — как и в get_platform_stats: стендам просмотры
+        набивает scripts/seed_demo_stats.py, и в мониторе они выглядели бы
+        настоящим трафиком.
+
+        Ботов фильтровать не нужно: с src/core/bots.py их взаимодействия не
+        записываются вовсе, так что в таблице уже только люди.
+        """
+        minutes = max(5, min(int(minutes), 180))
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(minutes=minutes)
+        today_start = (
+            now.astimezone(StatsDomain.LOCAL_TZ)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .astimezone(timezone.utc)
+        )
+
+        # Общее условие: взаимодействие принадлежит не-демо статье.
+        def _scoped(stmt):
+            return stmt.select_from(ArticleInteraction).join(
+                Article, Article.id == ArticleInteraction.article_id
+            ).where(article_is_not_demo())
+
+        # Метка НЕ "t": в SQLAlchemy 2.x `Row.t` — служебный алиас на кортеж
+        # всей строки, и `r.t` отдавал бы Row вместо даты. Значения читаем
+        # через _mapping, чтобы никакая метка не могла столкнуться с атрибутом
+        # Row (там же заняты count и index).
+        bucket = func.date_trunc("minute", ArticleInteraction.created_at).label("minute")
+        rows = (
+            await db.execute(
+                _scoped(select(bucket, _VIEW.label("v"), _DL.label("d")))
+                .where(ArticleInteraction.created_at >= since)
+                .group_by(bucket)
+                .order_by(bucket)
+            )
+        ).all()
+        by_minute = {}
+        for r in rows:
+            m = r._mapping
+            by_minute[m["minute"].replace(second=0, microsecond=0)] = (
+                int(m["v"]),
+                int(m["d"]),
+            )
+
+        # Ровно `minutes` корзин, включая пустые: без них график рисует прямую
+        # между двумя далёкими точками и провал читается как активность.
+        base = now.replace(second=0, microsecond=0)
+        buckets = []
+        for i in range(minutes - 1, -1, -1):
+            t = base - timedelta(minutes=i)
+            v, d = by_minute.get(t, (0, 0))
+            buckets.append({"at": t, "views": v, "downloads": d})
+
+        async def _totals(from_ts: datetime) -> dict:
+            row = (
+                await db.execute(
+                    _scoped(
+                        select(
+                            _VIEW.label("v"),
+                            _DL.label("d"),
+                            func.count(func.distinct(ArticleInteraction.ip_address)).label("ips"),
+                        )
+                    ).where(ArticleInteraction.created_at >= from_ts)
+                )
+            ).one()._mapping
+            return {
+                "views": int(row["v"]),
+                "downloads": int(row["d"]),
+                "visitors": int(row["ips"]),
+            }
+
+        window_totals = await _totals(since)
+        today_totals = await _totals(today_start)
+
+        active = (
+            await db.execute(
+                _scoped(
+                    select(func.count(func.distinct(ArticleInteraction.ip_address)))
+                ).where(
+                    ArticleInteraction.created_at
+                    >= now - timedelta(minutes=StatsDomain.ACTIVE_WINDOW_MINUTES)
+                )
+            )
+        ).scalar_one()
+
+        # Лента: по одной строке на событие. Журнал подтягиваем LEFT JOIN —
+        # у самостоятельных изданий выпуска нет, и inner join выкинул бы их.
+        recent_rows = (
+            await db.execute(
+                select(
+                    ArticleInteraction.article_id,
+                    ArticleInteraction.created_at,
+                    ArticleInteraction.view,
+                    ArticleInteraction.download,
+                    Article.title,
+                    Article.slug,
+                    Journal.name.label("journal"),
+                )
+                .select_from(ArticleInteraction)
+                .join(Article, Article.id == ArticleInteraction.article_id)
+                .outerjoin(Issue, Issue.id == Article.issue_id)
+                .outerjoin(Journal, Journal.id == Issue.journal_id)
+                .where(
+                    article_is_not_demo(),
+                    ArticleInteraction.created_at >= since,
+                    (ArticleInteraction.view == 1) | (ArticleInteraction.download == 1),
+                )
+                .order_by(ArticleInteraction.created_at.desc())
+                .limit(30)
+            )
+        ).all()
+
+        recent = [
+            {
+                "article_id": r.article_id,
+                "title": r.title,
+                "slug": r.slug,
+                "journal": r.journal,
+                "kind": "download" if (r.download or 0) == 1 else "view",
+                "at": r.created_at,
+            }
+            for r in recent_rows
+        ]
+
+        return {
+            "now": now,
+            "window_minutes": minutes,
+            "active_readers": int(active),
+            "window": window_totals,
+            "today": today_totals,
+            "minutes": buckets,
+            "recent": recent,
+        }
+
     # ===================== мутации (порт add_interaction) ====================
     @staticmethod
     async def increment_article_views(db: AsyncSession, article_id: int) -> None:
