@@ -423,6 +423,27 @@ class Author(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class AuthorClaim(Base):
+    """Заявка «эта карточка — моя». Решение принимает владелец платформы.
+
+    Автоматике здесь доверять нельзя: число публикаций идёт в аттестационные
+    документы, а ФИО в профиле пользователь правит сам — совпадение имени
+    подделывается за минуту.
+    """
+
+    __tablename__ = "author_claims"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    author_id = Column(UUID(as_uuid=True), ForeignKey("authors.id"), nullable=False)
+    profile_id = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=False)
+    status = Column(Text, server_default=text("'pending'::text"), nullable=False)
+    note = Column(Text, nullable=True)
+    decided_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=True)
+    decided_at = Column(DateTime(timezone=True), nullable=True)
+    decision_reason = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class ArticleAuthor(Base):
     __tablename__ = "article_authors"
     __table_args__ = (

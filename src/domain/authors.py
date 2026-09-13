@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Integer, Text, func, select
@@ -22,6 +23,7 @@ from src.infrastructure.persistence.models import (
     Article,
     ArticleAuthor,
     Author,
+    AuthorClaim,
     Issue,
     Journal,
     Profile,
@@ -240,33 +242,189 @@ class AuthorCardDomain:
             for r in rows
         ]
 
-    async def claim(
-        self, db: AsyncSession, slug: str, profile_id: str
+    async def request_claim(
+        self, db: AsyncSession, slug: str, profile_id: str, note: str | None = None
     ) -> dict[str, Any]:
-        """Присвоить карточку себе.
+        """Заявка «эта карточка — моя». Ничего не привязывает.
 
-        Проверки намеренно минимальны (нужен только вход): ложное присвоение
-        карточки однофамильца обратимо — владелец платформы отвяжет, — а барьер
-        из документов на этом шаге убил бы весь смысл затеи. Уже присвоенную
-        карточку второй раз забрать нельзя.
+        Решение принимает владелец платформы: число публикаций идёт в
+        аттестационные документы, у присвоения чужих работ есть прямая выгода, а
+        автопроверка по ФИО обходится за минуту — имя в профиле правит сам
+        пользователь.
         """
-        row = (
+        author = (
             await db.execute(select(Author).where(Author.slug == slug))
         ).scalar_one_or_none()
-        if row is None:
+        if author is None:
             raise AuthorCardError("Author card not found")
         uid = uuid.UUID(str(profile_id))
-        if row.profile_id is not None and row.profile_id != uid:
+
+        if author.profile_id is not None:
+            if author.profile_id == uid:
+                return {"status": "approved", "slug": author.slug}
             raise AuthorCardError("Author card already claimed")
 
-        row.profile_id = uid
-        # Дублируем связь в подписи: страницы профиля (/researcher/u/<id>)
-        # собирают публикации по article_authors.profile_id, и без этого шага
-        # присвоенная карточка не появилась бы в самом профиле.
-        await db.execute(
-            ArticleAuthor.__table__.update()
-            .where(ArticleAuthor.author_id == row.id)
-            .values(profile_id=uid)
-        )
+        existing = (
+            await db.execute(
+                select(AuthorClaim).where(
+                    AuthorClaim.author_id == author.id,
+                    AuthorClaim.profile_id == uid,
+                    AuthorClaim.status == "pending",
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            # Повторное нажатие кнопки не должно плодить очередь.
+            return {"status": "pending", "slug": author.slug, "claim_id": str(existing.id)}
+
+        claim = AuthorClaim(author_id=author.id, profile_id=uid, note=note)
+        db.add(claim)
         await db.commit()
-        return {"slug": row.slug, "profile_id": str(uid), "works": row.works_count}
+        await db.refresh(claim)
+        return {"status": "pending", "slug": author.slug, "claim_id": str(claim.id)}
+
+    async def my_claim(
+        self, db: AsyncSession, slug: str, profile_id: str
+    ) -> dict[str, Any] | None:
+        """Состояние моей заявки на эту карточку — для кнопки на странице."""
+        row = (
+            await db.execute(
+                select(AuthorClaim.status, AuthorClaim.decision_reason)
+                .join(Author, Author.id == AuthorClaim.author_id)
+                .where(
+                    Author.slug == slug,
+                    AuthorClaim.profile_id == uuid.UUID(str(profile_id)),
+                )
+                .order_by(AuthorClaim.created_at.desc())
+                .limit(1)
+            )
+        ).first()
+        if row is None:
+            return None
+        return {"status": row.status, "reason": row.decision_reason}
+
+    async def list_claims(
+        self, db: AsyncSession, status: str = "pending"
+    ) -> list[dict[str, Any]]:
+        """Очередь заявок для владельца: кто, на какую карточку и с чем."""
+        rows = (
+            await db.execute(
+                select(
+                    AuthorClaim.id,
+                    AuthorClaim.status,
+                    AuthorClaim.note,
+                    AuthorClaim.created_at,
+                    Author.slug,
+                    Author.display_name,
+                    Author.works_count,
+                    Profile.id.label("profile_id"),
+                    Profile.full_name,
+                    Profile.orcid_id,
+                    Profile.workplace,
+                )
+                .join(Author, Author.id == AuthorClaim.author_id)
+                .join(Profile, Profile.id == AuthorClaim.profile_id)
+                .where(AuthorClaim.status == status)
+                .order_by(AuthorClaim.created_at.asc())
+                .limit(500)
+            )
+        ).all()
+        return [
+            {
+                "id": str(r.id),
+                "status": r.status,
+                "note": r.note,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "author": {
+                    "slug": r.slug,
+                    "display_name": r.display_name,
+                    "works_count": r.works_count,
+                },
+                "profile": {
+                    "id": str(r.profile_id),
+                    "full_name": r.full_name,
+                    "orcid": r.orcid_id,
+                    "workplace": r.workplace,
+                },
+            }
+            for r in rows
+        ]
+
+    async def decide_claim(
+        self,
+        db: AsyncSession,
+        claim_id: str,
+        *,
+        approve: bool,
+        decided_by: str,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Решение владельца. Одобрение — единственный путь к привязке."""
+        claim = (
+            await db.execute(
+                select(AuthorClaim).where(AuthorClaim.id == uuid.UUID(str(claim_id)))
+            )
+        ).scalar_one_or_none()
+        if claim is None:
+            raise AuthorCardError("Claim not found")
+        if claim.status != "pending":
+            raise AuthorCardError("Claim already decided")
+
+        claim.status = "approved" if approve else "rejected"
+        claim.decided_by = uuid.UUID(str(decided_by))
+        claim.decided_at = datetime.now(timezone.utc)
+        claim.decision_reason = reason
+
+        if approve:
+            author = (
+                await db.execute(select(Author).where(Author.id == claim.author_id))
+            ).scalar_one()
+            if author.profile_id is not None and author.profile_id != claim.profile_id:
+                raise AuthorCardError("Author card already claimed")
+            author.profile_id = claim.profile_id
+            # Дублируем связь в подписях: профиль (/researcher/u/<id>) собирает
+            # публикации по article_authors.profile_id.
+            await db.execute(
+                ArticleAuthor.__table__.update()
+                .where(ArticleAuthor.author_id == author.id)
+                .values(profile_id=claim.profile_id)
+            )
+            # Остальные открытые заявки на эту карточку теряют смысл.
+            await db.execute(
+                AuthorClaim.__table__.update()
+                .where(
+                    AuthorClaim.author_id == author.id,
+                    AuthorClaim.id != claim.id,
+                    AuthorClaim.status == "pending",
+                )
+                .values(
+                    status="rejected",
+                    decided_by=uuid.UUID(str(decided_by)),
+                    decided_at=datetime.now(timezone.utc),
+                    decision_reason="Карточку присвоил другой заявитель",
+                )
+            )
+
+        await db.commit()
+        return {"id": str(claim.id), "status": claim.status}
+
+    async def unclaim(self, db: AsyncSession, slug: str) -> dict[str, Any]:
+        """Отвязать карточку (ошибка или спор). Только владелец платформы."""
+        author = (
+            await db.execute(select(Author).where(Author.slug == slug))
+        ).scalar_one_or_none()
+        if author is None:
+            raise AuthorCardError("Author card not found")
+        previous = author.profile_id
+        author.profile_id = None
+        if previous is not None:
+            await db.execute(
+                ArticleAuthor.__table__.update()
+                .where(
+                    ArticleAuthor.author_id == author.id,
+                    ArticleAuthor.profile_id == previous,
+                )
+                .values(profile_id=None)
+            )
+        await db.commit()
+        return {"slug": author.slug, "profile_id": None}

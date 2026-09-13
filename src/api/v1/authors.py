@@ -1,14 +1,16 @@
-"""Карточки авторов — публичные страницы /author/<slug> и присвоение.
+"""Карточки авторов — публичные страницы /author/<slug>, заявки и модерация.
 
 Читать может кто угодно: карточка адресована в том числе поисковикам, ради
-которых она и заводится. Писать (claim) — только под своей сессией.
+которых она и заводится. Заявку подаёт вошедший, а решение по ней принимает
+ТОЛЬКО владелец платформы: число публикаций попадает в аттестационные
+документы, и у присвоения чужих работ есть прямая выгода.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import get_current_profile
+from src.api.deps import get_current_profile, require_owner
 from src.domain.authors import AuthorCardDomain, AuthorCardError
 from src.infrastructure.persistence.db import get_db
 from src.infrastructure.persistence.models import Profile
@@ -17,11 +19,56 @@ router = APIRouter()
 domain = AuthorCardDomain()
 
 
+def _bad(err: AuthorCardError) -> HTTPException:
+    return HTTPException(status.HTTP_400_BAD_REQUEST, str(err))
+
+
+# Объявлены ДО /{slug}: иначе литерал "claims" уедет в параметр слага.
+@router.get("/claims")
+async def list_claims(
+    claim_status: str = "pending",
+    db: AsyncSession = Depends(get_db),
+    _: Profile = Depends(require_owner),
+):
+    """Очередь заявок на присвоение карточек (владелец)."""
+    return await domain.list_claims(db, claim_status)
+
+
+@router.post("/claims/{claim_id}/approve")
+async def approve_claim(
+    claim_id: str,
+    reason: str | None = Body(None, embed=True),
+    db: AsyncSession = Depends(get_db),
+    owner: Profile = Depends(require_owner),
+):
+    try:
+        return await domain.decide_claim(
+            db, claim_id, approve=True, decided_by=str(owner.id), reason=reason
+        )
+    except AuthorCardError as err:
+        raise _bad(err) from err
+
+
+@router.post("/claims/{claim_id}/reject")
+async def reject_claim(
+    claim_id: str,
+    reason: str | None = Body(None, embed=True),
+    db: AsyncSession = Depends(get_db),
+    owner: Profile = Depends(require_owner),
+):
+    try:
+        return await domain.decide_claim(
+            db, claim_id, approve=False, decided_by=str(owner.id), reason=reason
+        )
+    except AuthorCardError as err:
+        raise _bad(err) from err
+
+
 @router.get("/")
 async def list_authors(
     limit: int = 100, offset: int = 0, db: AsyncSession = Depends(get_db)
 ):
-    """Индексируемые карточки — перелинковка и карта сайта."""
+    """Индексируемые карточки — указатель, перелинковка и карта сайта."""
     return await domain.list_top(db, limit=limit, offset=offset)
 
 
@@ -35,13 +82,38 @@ async def author_card(slug: str, db: AsyncSession = Depends(get_db)):
     return card
 
 
-@router.post("/{slug}/claim")
-async def claim_author(
+@router.get("/{slug}/claim")
+async def my_claim(
     slug: str,
     db: AsyncSession = Depends(get_db),
     profile: Profile = Depends(get_current_profile),
 ):
+    """Состояние моей заявки — страница кэшируется, статус берём отдельно."""
+    return await domain.my_claim(db, slug, str(profile.id)) or {"status": "none"}
+
+
+@router.post("/{slug}/claim")
+async def request_claim(
+    slug: str,
+    note: str | None = Body(None, embed=True),
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(get_current_profile),
+):
+    """Подать заявку. Привязки не происходит — она только после одобрения."""
     try:
-        return await domain.claim(db, slug, str(profile.id))
+        return await domain.request_claim(db, slug, str(profile.id), note)
     except AuthorCardError as err:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(err)) from err
+        raise _bad(err) from err
+
+
+@router.post("/{slug}/unclaim")
+async def unclaim(
+    slug: str,
+    db: AsyncSession = Depends(get_db),
+    _: Profile = Depends(require_owner),
+):
+    """Отвязать карточку — на случай ошибки или спора (владелец)."""
+    try:
+        return await domain.unclaim(db, slug)
+    except AuthorCardError as err:
+        raise _bad(err) from err
