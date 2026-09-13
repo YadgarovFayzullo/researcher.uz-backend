@@ -152,6 +152,33 @@ class AuthorCardDomain:
             ],
         }
 
+    async def cards_for_article(
+        self, db: AsyncSession, article_id: int
+    ) -> list[dict[str, Any]]:
+        """Подписи под статьёй вместе со слагом карточки автора.
+
+        Нужны странице статьи: до карточек имя автора вело в поиск, а он
+        `noindex` — то есть перелинковки для робота не возникало вовсе.
+        Подпись без карточки (имя из одного слова) отдаётся со slug = null и
+        остаётся обычным текстом.
+        """
+        rows = (
+            await db.execute(
+                select(
+                    ArticleAuthor.author_name,
+                    ArticleAuthor.author_order,
+                    Author.slug,
+                )
+                .outerjoin(Author, Author.id == ArticleAuthor.author_id)
+                .where(ArticleAuthor.article_id == article_id)
+                .order_by(ArticleAuthor.author_order)
+            )
+        ).all()
+        return [
+            {"name": r.author_name, "slug": r.slug, "order": r.author_order}
+            for r in rows
+        ]
+
     async def claim(
         self, db: AsyncSession, slug: str, profile_id: str
     ) -> dict[str, Any]:

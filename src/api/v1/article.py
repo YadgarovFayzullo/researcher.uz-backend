@@ -6,17 +6,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
 
 from src.api.deps import get_current_profile, require_owner
+from src.core.config import settings
 from src.domain.authz import can_write_article
-from src.domain import moderation
+from src.domain import ai_review, moderation
 from src.infrastructure.persistence.db import get_db
-from src.infrastructure.persistence.models import Profile
+from src.infrastructure.persistence.models import Article, Profile
 from src.schemas.article import ArticleCreate, ArticleUpdate
+from src.domain.authors import AuthorCardDomain
 from src.domain.article import ArticleDomain
+from src.domain.serialization import HEAVY_ARTICLE_COLUMNS, row_to_dict
 from src.infrastructure.covers import generate_cover_from_pdf
 from src.infrastructure.persistence.db import AsyncSessionLocal
 
 router = APIRouter()
 domain = ArticleDomain()
+_author_cards = AuthorCardDomain()
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +54,25 @@ def _forbidden() -> HTTPException:
     return HTTPException(status.HTTP_403_FORBIDDEN, "Not allowed to write this article")
 
 
+def _public(article: Article) -> dict:
+    """Строка статьи без служебных колонок поиска.
+
+    ORM-объект, отданный FastAPI напрямую, сериализуется целиком — вместе с
+    768-мерным `embedding` и тремя tsvector'ами. В ответе `/article/<slug>` это
+    16 КБ из 18 КБ, и каждый из них уезжал в HTML страницы статьи (RSC-пейлоад),
+    а оттуда — в трафик compute → CDN на каждом ISR-рендере. Список статей
+    вычищал их давно (`_LIST_EXCLUDE`), одиночная статья — нет.
+    """
+    data = row_to_dict(article, Article, exclude=HEAVY_ARTICLE_COLUMNS)
+    # JSONB-колонка в модели названа `meta` (слово `metadata` занято SQLAlchemy),
+    # и голая сериализация строки отдавала наружу именно её. Списки же идут через
+    # `ArticleListResponse`, где поле называется `metadata` — и фронт с
+    # генерированными типами ждёт того же. Из-за расхождения `article.metadata`
+    # на странице статьи всегда был undefined. Приводим к общему имени.
+    data["metadata"] = data.pop("meta", None)
+    return data
+
+
 @router.get("/resolve/{slug}")
 async def resolve_slug(slug: str, db: AsyncSession = Depends(get_db)):
     """Актуальный слаг для старого адреса — для 301 со страницы статьи.
@@ -70,7 +93,10 @@ async def get_article(slug: str, db: AsyncSession = Depends(get_db)):
     article = await domain.get_article_by_slug(db, slug, published_only=True)
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
-    return {"status": "ok", "article": article}
+    # Слаги карточек авторов: страница статьи ссылается на них именами авторов.
+    # Раньше имя вело в /search, а он noindex — перелинковки для робота не было.
+    cards = await _author_cards.cards_for_article(db, article.id)
+    return {"status": "ok", "article": _public(article), "author_cards": cards}
 
 
 @router.post("/", status_code=201)
@@ -92,9 +118,28 @@ async def create_article(
     if not allowed:
         raise _forbidden()
     article = await domain.create_article(db, article_in)
+
+    # Статья в выпуске не публикуется сразу: сначала ИИ сверяет метаданные с
+    # приложенным PDF (см. src/domain/ai_review.py). Через час после последней
+    # залитой в этот выпуск статьи планировщик проверит их пачкой и либо
+    # опубликует, либо погасит выпуск и напишет владельцу. Отдельные издания
+    # (монографии, диссертации) сюда не попадают — у них нет выпуска.
+    queued = False
+    if settings.REVIEW_ACTIVE and article.issue_id:
+        article.published = False
+        ai_review.queue_article(article)
+        await db.commit()
+        await db.refresh(article)
+        queued = True
+
     if article.pdf and not article.cover_image:
         background.add_task(_fill_cover, article.id)
-    return {"status": "created", "slug": article.slug, "article": article}
+    return {
+        "status": "created",
+        "slug": article.slug,
+        "article": _public(article),
+        "ai_review_queued": queued,
+    }
 
 
 @router.patch("/{id}")
@@ -125,7 +170,7 @@ async def update_article(
         raise HTTPException(status_code=404, detail="Article not found")
     if article.pdf and not article.cover_image:
         background.add_task(_fill_cover, article.id)
-    return {"status": "updated", "article": article}
+    return {"status": "updated", "article": _public(article)}
 
 
 @router.delete("/{id}")
@@ -147,10 +192,13 @@ async def delete_article(
     )
     if not allowed:
         raise _forbidden()
+    # Слаг читаем до удаления: после него строки уже нет, а фронту он нужен —
+    # иначе страница удалённой статьи продолжит отдаваться из ISR-кэша неделю.
+    slug = existing.slug
     deleted = await domain.delete_article(db, id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Article not found")
-    return {"status": "deleted"}
+    return {"status": "deleted", "revalidate_slugs": [slug] if slug else []}
 
 
 class TakedownRequest(BaseModel):
@@ -178,6 +226,13 @@ async def takedown_article(
     result = await moderation.takedown_article(
         db, article, reason=body.reason, by=profile.id
     )
+    # Слаги всего, что погасла эта санкция (нарушитель + статьи его выпуска), —
+    # админка сбрасывает по ним ISR-кэш страниц. Без этого снятое остаётся
+    # открытым на сайте до конца срока кэша, то есть до месяца.
+    blocked = result.get("issue_blocked") or {}
+    result["revalidate_slugs"] = await moderation.article_slugs(
+        db, [article.id, *(blocked.get("article_ids") or [])]
+    )
     return {"status": "taken_down", **result}
 
 
@@ -194,4 +249,8 @@ async def restore_article(
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
     await moderation.restore_article(db, article)
-    return {"status": "restored", "article_id": id}
+    return {
+        "status": "restored",
+        "article_id": id,
+        "revalidate_slugs": [article.slug] if article.slug else [],
+    }
