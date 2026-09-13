@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 from src.api.v1 import (
+    authors,
     journals,
     journal,
     issues,
@@ -24,6 +25,8 @@ from src.api.v1 import (
     imports,
     plagiarism,
     oai,
+    crossref,
+    telegram,
 )
 
 api_router = APIRouter()
@@ -36,6 +39,7 @@ api_router.include_router(
     sections.router, prefix="/conference-sections", tags=["conference-sections"]
 )
 api_router.include_router(articles.router, prefix="/articles", tags=["articles"])
+api_router.include_router(authors.router, prefix="/authors", tags=["authors"])
 # Под-ресурсы статьи: /articles/{id}/authors, /articles/{id}/references.
 api_router.include_router(
     article_content.router, prefix="/articles", tags=["article-content"]
@@ -72,8 +76,16 @@ api_router.include_router(security.router, prefix="/security", tags=["security"]
 api_router.include_router(imports.router, prefix="/import", tags=["import"])
 # Проверка на заимствования по базе платформы.
 api_router.include_router(plagiarism.router, prefix="/plagiarism", tags=["plagiarism"])
+# Вебхук Telegram: кнопки «опубликовать / оставить закрытым» под разбором
+# ИИ-проверки выпуска (ai-review-integration.md). Авторизации у Telegram нет,
+# ручка закрыта секретом вебхука и chat_id владельца.
+api_router.include_router(telegram.router, prefix="/telegram", tags=["telegram"])
 
 # OAI-PMH: выдача метаданных партнёрам-агрегаторам. Не публичный эндпоинт —
 # закрыт ключом из oai_clients (src/core/oai_access.py), поэтому и prefix
 # короткий: baseURL партнёру даётся как https://api.researcher.uz/oai.
 api_router.include_router(oai.router, prefix="/oai", tags=["oai"])
+
+# Регистрация DOI в Crossref (crossref-integration.md). Owner-only: депозит
+# стоит денег издателю и необратим.
+api_router.include_router(crossref.router, prefix="/crossref", tags=["crossref"])

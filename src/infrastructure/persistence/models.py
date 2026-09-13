@@ -401,6 +401,28 @@ class ArticleInteraction(Base):
     article = relationship("Article", back_populates="interactions")
 
 
+class Author(Base):
+    """Карточка автора — личность, собранная из подписей под статьями.
+
+    Живёт независимо от аккаунта: у авторов импортированных статей его нет.
+    `profile_id` появляется только после claim («Это я») и превращает карточку
+    в профиль человека.
+    """
+
+    __tablename__ = "authors"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    # Ключ из src/domain/author_names.identity_key — «тот же человек».
+    name_key = Column(Text, nullable=False, unique=True)
+    slug = Column(Text, nullable=False, unique=True)
+    display_name = Column(Text, nullable=False)
+    profile_id = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=True)
+    orcid = Column(Text, nullable=True)
+    works_count = Column(Integer, server_default=text("0"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class ArticleAuthor(Base):
     __tablename__ = "article_authors"
     __table_args__ = (
@@ -420,6 +442,7 @@ class ArticleAuthor(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
     orcid = Column(Text, nullable=True)
+    author_id = Column(UUID(as_uuid=True), ForeignKey("authors.id"), nullable=True)
 
     article = relationship("Article", back_populates="authors_rel")
 
@@ -778,3 +801,57 @@ class OaiClient(Base):
     last_seen_at = Column(DateTime(timezone=True), nullable=True)
     last_seen_ip = Column(Text, nullable=True)
     requests_count = Column(BigInteger, nullable=False, server_default=text("0"))
+
+
+class CrossrefDeposit(Base):
+    """Регистрация DOI статьи в Crossref: одна строка на (статья, среда).
+
+    Депозит асинхронный: сервлет Crossref принимает батч и отвечает только
+    «принято», а результат разбора приходит позже отдельным запросом по
+    doi_batch_id. Поэтому состояние обязано жить в БД — «отправлено» это ещё
+    не «зарегистрировано», и показывать редактору второе вместо первого значит
+    врать ему про то, работает ли ссылка.
+
+    Среда в ключе, потому что песочница (test.crossref.org) — отдельный мир со
+    своей учёткой: тестовый прогон не должен выглядеть в интерфейсе боевой
+    регистрацией и не должен мешать сделать её потом.
+    """
+
+    __tablename__ = "crossref_deposits"
+    __table_args__ = (
+        CheckConstraint(
+            "status = ANY (ARRAY['pending'::text, 'submitted'::text, "
+            "'registered'::text, 'failed'::text])",
+            name="crossref_deposits_status_check",
+        ),
+        CheckConstraint(
+            "environment = ANY (ARRAY['test'::text, 'production'::text])",
+            name="crossref_deposits_environment_check",
+        ),
+        UniqueConstraint("article_id", "environment", name="crossref_deposits_article_env_key"),
+        Index("ix_crossref_deposits_status", "status", "submitted_at"),
+    )
+
+    id = Column(BigInteger, Identity(always=True), primary_key=True)
+    article_id = Column(
+        BigInteger, ForeignKey("articles.id", ondelete="CASCADE"), nullable=False
+    )
+    environment = Column(Text, nullable=False, server_default=text("'test'::text"))
+    # DOI, который ушёл (или уйдёт) в депозит. Фиксируется на строке, а не
+    # вычисляется на лету: суффикс считается по шаблону из настроек, а шаблон
+    # когда-нибудь поменяют — уже зарегистрированный DOI менять нельзя.
+    doi = Column(Text, nullable=False)
+    # Наш идентификатор батча, он же ключ для опроса результата.
+    batch_id = Column(Text, nullable=True, unique=True)
+    status = Column(Text, nullable=False, server_default=text("'pending'::text"))
+    attempts = Column(Integer, nullable=False, server_default=text("0"))
+    error = Column(Text, nullable=True)
+    # Разбор ответа Crossref целиком: диагностика по записи, предупреждения.
+    result = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    submitted_at = Column(DateTime(timezone=True), nullable=True)
+    checked_at = Column(DateTime(timezone=True), nullable=True)
+    registered_at = Column(DateTime(timezone=True), nullable=True)
+
+    article = relationship("Article")
