@@ -13,7 +13,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import Integer, Text, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.content import AuthorDomain
@@ -22,6 +22,8 @@ from src.infrastructure.persistence.models import (
     Article,
     ArticleAuthor,
     Author,
+    Issue,
+    Journal,
     Profile,
 )
 
@@ -122,33 +124,92 @@ class AuthorCardDomain:
     async def list_top(
         self, db: AsyncSession, limit: int = 100, offset: int = 0
     ) -> dict[str, Any]:
-        """Список карточек для перелинковки и карты сайта.
+        """Список карточек: указатель авторов, перелинковка и карта сайта.
 
-        Только индексируемые: остальные не нужны ни роботу, ни человеку.
+        Только индексируемые: карточек с одной работой тысячи, и в списке они
+        были бы шумом, а в индексе — тонкими страницами.
+
+        Кроме имени отдаём то, по чему человека узнают: где печатается, за
+        какие годы и сколько работ. Эти поля собираются ОДНИМ запросом с
+        агрегацией, а не по запросу на карточку: на странице их две сотни.
         """
         where = Author.works_count >= MIN_WORKS_FOR_INDEX
         total = (
             await db.execute(select(func.count(Author.id)).where(where))
         ).scalar_one()
+
+        page = (
+            select(Author.id)
+            .where(where)
+            .order_by(Author.works_count.desc(), Author.display_name)
+            .limit(min(limit, 500))
+            .offset(offset)
+            .subquery()
+        )
+
+        year = func.coalesce(
+            Article.publication_year,
+            func.nullif(func.substr(func.cast(Article.data, Text), 1, 4), "").cast(
+                Integer
+            ),
+        )
         rows = (
             await db.execute(
-                select(Author)
-                .where(where)
+                select(
+                    Author.slug,
+                    Author.display_name,
+                    Author.works_count,
+                    Author.orcid,
+                    Author.profile_id,
+                    Profile.avatar_url,
+                    Profile.workplace,
+                    # Журнал, где автор печатается чаще всего: одна строка
+                    # говорит о человеке больше, чем список из десяти.
+                    func.mode().within_group(Journal.name).label("main_journal"),
+                    func.min(year).label("first_year"),
+                    func.max(year).label("last_year"),
+                )
+                .select_from(Author)
+                .join(page, page.c.id == Author.id)
+                .outerjoin(ArticleAuthor, ArticleAuthor.author_id == Author.id)
+                .outerjoin(
+                    Article,
+                    (Article.id == ArticleAuthor.article_id)
+                    & Article.published.is_(True),
+                )
+                .outerjoin(Issue, Issue.id == Article.issue_id)
+                .outerjoin(Journal, Journal.id == Issue.journal_id)
+                .outerjoin(Profile, Profile.id == Author.profile_id)
+                .group_by(
+                    Author.id,
+                    Author.slug,
+                    Author.display_name,
+                    Author.works_count,
+                    Author.orcid,
+                    Author.profile_id,
+                    Profile.avatar_url,
+                    Profile.workplace,
+                )
                 .order_by(Author.works_count.desc(), Author.display_name)
-                .limit(min(limit, 500))
-                .offset(offset)
             )
-        ).scalars().all()
+        ).all()
+
         return {
             "total": total,
             "items": [
                 {
-                    "slug": a.slug,
-                    "display_name": a.display_name,
-                    "works_count": a.works_count,
-                    "claimed": a.profile_id is not None,
+                    "slug": r.slug,
+                    "display_name": r.display_name,
+                    "works_count": r.works_count,
+                    "orcid": r.orcid,
+                    "claimed": r.profile_id is not None,
+                    "avatar_url": r.avatar_url,
+                    "workplace": r.workplace,
+                    "main_journal": r.main_journal,
+                    "first_year": r.first_year,
+                    "last_year": r.last_year,
                 }
-                for a in rows
+                for r in rows
             ],
         }
 

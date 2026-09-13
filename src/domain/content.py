@@ -19,6 +19,7 @@ from src.infrastructure.persistence.models import (
     Article,
     ArticleAuthor,
     ArticleInteraction,
+    Author,
     ArticleReference,
     ConferenceSection,
     Issue,
@@ -174,6 +175,8 @@ class AuthorDomain:
             .where(where)
             .order_by(Article.data.desc().nullslast(), Article.id.desc())
         )
+        rows = res.all()
+        coauthors = await self._coauthors(db, [r.id for r in rows])
         return [
             {
                 "author_name": r.author_name,
@@ -188,10 +191,43 @@ class AuthorDomain:
                     "doi": r.doi,
                     "publisher": r.publisher,
                     "journal_name": r.journal_name,
+                    # Все подписанты статьи со слагами их карточек. Соавтор в
+                    # списке работ — это ссылка на его страницу, где он может
+                    # забрать себе те же работы: иначе о существовании своей
+                    # карточки он не узнает никак.
+                    "coauthors": coauthors.get(r.id, []),
                 },
             }
-            for r in res.all()
+            for r in rows
         ]
+
+    async def _coauthors(
+        self, db: AsyncSession, article_ids: list[int]
+    ) -> dict[int, list[dict[str, Any]]]:
+        """{article_id: [{name, slug}]} одним запросом на весь список.
+
+        Пишется батчем намеренно: в профиле плодовитого автора полсотни работ,
+        и запрос на карточку превратил бы страницу в полсотни обращений к базе.
+        """
+        if not article_ids:
+            return {}
+        res = await db.execute(
+            select(
+                ArticleAuthor.article_id,
+                ArticleAuthor.author_name,
+                ArticleAuthor.author_order,
+                Author.slug,
+            )
+            .outerjoin(Author, Author.id == ArticleAuthor.author_id)
+            .where(ArticleAuthor.article_id.in_(set(article_ids)))
+            .order_by(ArticleAuthor.article_id, ArticleAuthor.author_order)
+        )
+        out: dict[int, list[dict[str, Any]]] = {}
+        for row in res.all():
+            out.setdefault(row.article_id, []).append(
+                {"name": row.author_name, "slug": row.slug}
+            )
+        return out
 
 
 class ReferenceDomain:
