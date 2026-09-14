@@ -11,6 +11,7 @@ from src.api.v1 import (
     library,
     stats,
     article,
+    article_trash,
     auth,
     google_auth,
     orcid_auth,
@@ -23,10 +24,12 @@ from src.api.v1 import (
     news,
     security,
     imports,
+    folder_import,
     plagiarism,
     oai,
     crossref,
     telegram,
+    outreach,
 )
 
 api_router = APIRouter()
@@ -47,6 +50,10 @@ api_router.include_router(
 api_router.include_router(library.router, prefix="/library", tags=["library"])
 api_router.include_router(stats.router, prefix="/stats", tags=["stats"])
 api_router.include_router(article.router, prefix="/article", tags=["article"])
+# Корзина удалённых статей: 30 дней на восстановление, owner-only.
+api_router.include_router(
+    article_trash.router, prefix="/article-trash", tags=["article-trash"]
+)
 
 # Auth (Фаза 3)
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
@@ -74,6 +81,11 @@ api_router.include_router(news.router, prefix="/news", tags=["news"])
 api_router.include_router(security.router, prefix="/security", tags=["security"])
 # Импорт архивов с других платформ (import-integration.md).
 api_router.include_router(imports.router, prefix="/import", tags=["import"])
+# Загрузка папки PDF редактором: метаданные берутся из самих файлов.
+# В отличие от импорта архивов — не owner-only, права считаются по выпуску.
+api_router.include_router(
+    folder_import.router, prefix="/import/folder", tags=["import"]
+)
 # Проверка на заимствования по базе платформы.
 api_router.include_router(plagiarism.router, prefix="/plagiarism", tags=["plagiarism"])
 # Вебхук Telegram: кнопки «опубликовать / оставить закрытым» под разбором
@@ -89,3 +101,7 @@ api_router.include_router(oai.router, prefix="/oai", tags=["oai"])
 # Регистрация DOI в Crossref (crossref-integration.md). Owner-only: депозит
 # стоит денег издателю и необратим.
 api_router.include_router(crossref.router, prefix="/crossref", tags=["crossref"])
+
+# Отписка от рассылки авторам. Публичная и без сессии: человек приходит из
+# письма, аккаунта у него нет. Адрес защищён HMAC-подписью в ссылке.
+api_router.include_router(outreach.router, prefix="/outreach", tags=["outreach"])

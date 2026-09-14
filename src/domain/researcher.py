@@ -8,21 +8,119 @@
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 from typing import Any
 
 import re
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.domain.author_names import DIGRAPHS, STANDALONE_SUFFIX, clean, translit
 from src.infrastructure.persistence.models import (
     Article,
     ArticleAuthor,
+    Author,
+    AuthorClaim,
     Profile,
     ResearcherWork,
 )
 
 _DOI_PREFIX = re.compile(r"^https?://(dx\.)?doi\.org/", re.IGNORECASE)
+
+
+def _profile_name_parts(full_name: str | None) -> tuple[list[str], list[str]]:
+    """ФИО профиля → (полные слова, инициалы) в алфавите ключей карточек.
+
+    Разбор повторяет `identity_key`: транслитерация до проверки на инициал
+    («Ш.» → «sh» — это инициал, а не слово), отдельные «qizi»/«o'g'li» выкинуты.
+    """
+    tokens = [
+        translit(t) for t in re.split(r"[\s.]+", clean(full_name or "").lower()) if t
+    ]
+    tokens = [t for t in tokens if t and t not in STANDALONE_SUFFIX]
+    is_initial = lambda t: len(t) == 1 or (len(t) == 2 and t in DIGRAPHS)  # noqa: E731
+    words = [t for t in tokens if not is_initial(t)]
+    initials = [t[0] for t in tokens if is_initial(t)]
+    return words, initials
+
+
+def _within(a: list[str], b: list[str]) -> bool:
+    """Мультимножество a целиком входит в b."""
+    return not (Counter(a) - Counter(b))
+
+
+def _fold(word: str) -> str:
+    """Имя для сравнения написаний: «Farhod» = «Фарход» (farxod), «Yorqinoy» = «Yorkinoy»."""
+    w = re.sub(r"['\-]", "", word.lower())
+    return w.replace("kh", "x").replace("h", "x").replace("q", "k")
+
+
+def _same_given_name(a: str, b: str) -> bool:
+    fa, fb = _fold(a), _fold(b)
+    # Префикс — для «Muhammad» против «Muhammadyusuf»; короче 4 букв не
+    # доверяем, иначе «Ali» совпал бы с «Alisher» и «Alirizo» разом.
+    return fa == fb or (
+        min(len(fa), len(fb)) >= 4 and (fa.startswith(fb) or fb.startswith(fa))
+    )
+
+
+def card_matches_name(
+    name_key: str, full_name: str | None, display_name: str | None = None
+) -> bool:
+    """Похожа ли карточка автора (по её `name_key`) на ФИО из профиля.
+
+    Сравнение мягче, чем склейка карточек: профиль пишут «Fayzullo Yadgarov»,
+    а под статьёй стоит «Yadgarov F.B.», и точный ключ тут не совпадёт никогда.
+    Мягкость допустима, потому что результат — только подсказка: привязку
+    по-прежнему решает владелец платформы по заявке «Это я».
+
+    `display_name` (самое полное написание карточки) отсекает однофамильцев,
+    которых ключ не различает: у «Boymatov Bahrom» ключ тот же `boymatov|b…`,
+    что подошёл бы «Bekzod Boymatov», но имя на ту же букву — другое.
+    """
+    words, initials = _profile_name_parts(full_name)
+    # Одно слово — как и в identity_key: за ним разные люди.
+    if len(words) < 2:
+        return False
+
+    head, _, tail = name_key.partition("|")
+    card_words = [w for w in head.split("+") if w]
+    card_initials = [i for i in tail.split(".") if i]
+
+    if len(card_words) >= 2:
+        # Карточка неизвестного порядка «имя+фамилия»: все её слова есть в ФИО
+        # (или наоборот — в ФИО нет отчества, а в карточке оно словом).
+        return len(set(card_words) & set(words)) >= 2 and (
+            set(card_words) <= set(words) or set(words) <= set(card_words)
+        )
+
+    if len(card_words) != 1 or card_words[0] not in words or not card_initials:
+        return False
+    surname = card_words[0]
+    mine = [w[0] for w in words if w != surname] + initials
+    # Инициалы не должны спорить: одна сторона полнее другой (в профиле нет
+    # отчества, в подписи есть), но общая буква обязательна.
+    if not (set(mine) & set(card_initials)) or not (
+        _within(card_initials, mine) or _within(mine, card_initials)
+    ):
+        return False
+
+    if display_name:
+        # Полные имена карточки на ту же букву, что имя в профиле, должны с ним
+        # совпасть. Отчество («…ovich») именем не считаем: «Bekzod» против
+        # «Bekzod Bahodirovich» — это не спор.
+        theirs = [
+            w
+            for w in _profile_name_parts(display_name)[0]
+            if _fold(w) != _fold(surname)
+            and not re.search(r"(ovich|evich|ovna|evna)$", w)
+        ]
+        for given in (w for w in words if w != surname):
+            rivals = [w for w in theirs if w[0] == given[0]]
+            if rivals and not any(_same_given_name(given, r) for r in rivals):
+                return False
+    return True
 
 
 def _norm_doi(doi: str | None) -> str | None:
@@ -94,6 +192,82 @@ class ResearcherDomain:
         if prof is None:
             raise CabinetError("profile not found")
         return prof
+
+    async def suggest_author_cards(
+        self, db: AsyncSession, *, user_id, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """Непривязанные карточки авторов, похожие на ФИО профиля.
+
+        Карточку с отклонённой заявкой не подсказываем: владелец уже решил, и
+        баннер не должен звать подавать её снова (со страницы карточки повторная
+        заявка по-прежнему возможна).
+        """
+        prof = await self._profile(db, user_id)
+        words, _ = _profile_name_parts(prof.full_name)
+        if len(words) < 2:
+            return []
+
+        # Грубый отбор в SQL, точный — card_matches_name. Ключи бывают двух форм:
+        # «фамилия|инициалы» — ищем по началу, «слово+слово» — нужны два слова
+        # сразу, иначе частое имя («dilnoza») притащило бы сотни чужих карточек.
+        like = lambda w: Author.name_key.contains(w, autoescape=True)  # noqa: E731
+        conds = [Author.name_key.startswith(f"{w}|", autoescape=True) for w in words]
+        conds += [
+            like(a) & like(b) for i, a in enumerate(words) for b in words[i + 1:]
+        ]
+        rows = (
+            await db.execute(
+                select(
+                    Author.id,
+                    Author.slug,
+                    Author.display_name,
+                    Author.works_count,
+                    Author.name_key,
+                )
+                .where(
+                    Author.profile_id.is_(None),
+                    Author.works_count > 0,
+                    or_(*conds),
+                )
+                .order_by(Author.works_count.desc(), Author.slug)
+                .limit(200)
+            )
+        ).all()
+        cards = [
+            r
+            for r in rows
+            if card_matches_name(r.name_key, prof.full_name, r.display_name)
+        ]
+        if not cards:
+            return []
+
+        claims = (
+            await db.execute(
+                select(AuthorClaim.author_id, AuthorClaim.status)
+                .where(
+                    AuthorClaim.profile_id == prof.id,
+                    AuthorClaim.author_id.in_([c.id for c in cards]),
+                )
+                .order_by(AuthorClaim.created_at)
+            )
+        ).all()
+        # По порядку created_at: последняя заявка перетирает прежние.
+        latest = {c.author_id: c.status for c in claims}
+
+        out: list[dict[str, Any]] = []
+        for c in cards:
+            status = latest.get(c.id, "none")
+            if status == "rejected":
+                continue
+            out.append(
+                {
+                    "slug": c.slug,
+                    "display_name": c.display_name,
+                    "works_count": c.works_count,
+                    "claim_status": status,
+                }
+            )
+        return out[:limit]
 
     # ------------------------------------------------------------------ #
     async def update_my_profile(

@@ -1,0 +1,15 @@
+Assalomu alaykum, $name!
+
+researcher.uz'da ro'yxatdan o'tganingiz uchun rahmat.
+
+Platformada «$author_name» muallif sahifasi bor — unda $works ta ishingiz jamlangan. Uni profilingizga biriktirish uchun bir qadam qoldi:
+
+1. Sahifani oching: $url
+2. «Bu men — ariza yuborish» tugmasini bosing va izohda mualliflikni tasdiqlovchi ma'lumot yozing: ish joyingiz yoki maqolada ko'rsatilgan e-pochtangiz.
+
+Ariza tasdiqlangach, barcha ishlaringiz profilingizda ko'rinadi — xat orqali xabar beramiz.
+
+Savollar bo'lsa, shu xatga javob yozing.
+
+Hurmat bilan,
+$signature

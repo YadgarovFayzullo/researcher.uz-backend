@@ -444,6 +444,37 @@ class AuthorClaim(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class OutreachSuppression(Base):
+    """Стоп-лист рассылки авторам: отписки, жалобы, недоставляемые адреса.
+
+    Адрес отсюда не получает писем ни из какой кампании — навсегда.
+    """
+
+    __tablename__ = "outreach_suppressions"
+
+    email = Column(Text, primary_key=True)
+    reason = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class OutreachSend(Base):
+    """Одно письмо рассылки авторам. Нужен, чтобы повторный запуск волны не
+    слал письмо второй раз и чтобы напоминание уходило только через неделю
+    после первого."""
+
+    __tablename__ = "outreach_sends"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email = Column(Text, nullable=False)
+    campaign = Column(Text, nullable=False)
+    author_slug = Column(Text, nullable=True)
+    subject = Column(Text, nullable=True)
+    status = Column(Text, nullable=False)  # sent | failed
+    provider_id = Column(Text, nullable=True)
+    error = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class ArticleAuthor(Base):
     __tablename__ = "article_authors"
     __table_args__ = (
@@ -593,7 +624,7 @@ class ImportJob(Base):
     __tablename__ = "import_jobs"
     __table_args__ = (
         CheckConstraint(
-            "source_type = ANY (ARRAY['table'::text, 'oai'::text])",
+            "source_type = ANY (ARRAY['table'::text, 'oai'::text, 'folder'::text])",
             name="import_jobs_source_type_check",
         ),
         CheckConstraint(
@@ -662,6 +693,31 @@ class ImportItem(Base):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     job = relationship("ImportJob", back_populates="items")
+
+
+class ArticleTrash(Base):
+    """Удалённая статья: снимок строки и зависимых строк на 30 дней.
+
+    Логика — в src/domain/article_trash.py. FK нет намеренно: выпуск, журнал и
+    удалившего могут удалить раньше, чем истечёт срок записи.
+    """
+
+    __tablename__ = "article_trash"
+    __table_args__ = (
+        Index("ix_article_trash_deleted_at", "deleted_at"),
+        Index("ix_article_trash_journal_id", "journal_id"),
+    )
+
+    id = Column(BigInteger, Identity(always=True), primary_key=True)
+    article_id = Column(BigInteger, nullable=False)
+    title = Column(Text, nullable=True)
+    slug = Column(Text, nullable=True)
+    issue_id = Column(BigInteger, nullable=True)
+    journal_id = Column(BigInteger, nullable=True)
+    journal_name = Column(Text, nullable=True)
+    deleted_by = Column(UUID(as_uuid=True), nullable=True)
+    deleted_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    snapshot = Column(JSONB, nullable=False)
 
 
 # ---------------------------------------------------------------------------

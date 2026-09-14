@@ -1,0 +1,26 @@
+Assalomu alaykum, $name!
+
+Bu — researcher.uz, O'zbekiston ilmiy jurnallari va 6600 dan ortiq maqola joylashgan platforma. Ular orasida «$journal» ham bor.
+
+Biz barcha maqolalar mualliflarini yagona ko'rsatkichga jamladik. Sizning imzoingiz ostida $works ta ish topildi, shular orasida «$article» ($article_url). Ular asosida muallif sahifangiz tayyorlandi:
+
+$site/uz/author/$slug
+
+Sahifada hozir nima bor:
+— platformadagi barcha nashrlaringiz bitta ro'yxatda;
+— iqtiboslar soni, h-indeks va i10 — avtomatik hisoblangan;
+— sahifa Google va Google Scholar uchun ochiq: familiyangizni qidirgan hamkasbingiz tarqoq PDF fayllarga emas, shu sahifaga tushadi.
+
+Sahifaning egasi hali yo'q. Undagi «Bu men» tugmasini bosing — tizimga kirib, arizangiz qisqa tekshiruvdan o'tgach, u sizning profilingizga aylanadi: ismingiz qanday yozilishini o'zingiz belgilaysiz, ish joyini ko'rsatasiz va ORCID'ni ulaysiz — boshqa nashrlardagi ishlaringiz ham profilga qo'shiladi.
+
+Sahifani ochish:
+$site/uz/author/$slug
+
+Sizdan bir daqiqa vaqt talab qilinadi. Agar bu ishlar sizniki bo'lmasa — shu xatga javob yozing, manzilni ro'yxatdan o'chiramiz.
+
+Hurmat bilan,
+$signature
+
+--
+Ushbu xat sizga platformada chop etilgan maqolada bog'lanish uchun ko'rsatilgan manzil bo'yicha yuborildi.
+Obunani bekor qilish: $unsubscribe

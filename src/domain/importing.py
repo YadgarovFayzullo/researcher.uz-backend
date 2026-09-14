@@ -10,38 +10,62 @@
 2. Импорт длинный и рвётся посередине — нужно состояние, чтобы продолжить.
 3. Клиенту нужен отчёт: что создано, что дубликат, что упало и почему.
 
+Источник «папка PDF» (`source_type = 'folder'`) — рабочий инструмент редактора
+выпуска, а не услуга владельца: таблицы нет, метаданные читаются из самих
+файлов (`src/domain/pdf_metadata.py`), все статьи ложатся в один заранее
+выбранный выпуск и уходят на автопроверку, как статьи из формы.
+
 Этот модуль ничего не знает про HTTP: ошибки — доменные исключения, транспорт
 их переводит в статусы (см. `src/api/v1/imports.py`).
 """
 from __future__ import annotations
 
+import asyncio
 import csv
 import hashlib
 import io
+import logging
 import re
 import time
 import unicodedata
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import TYPE_CHECKING, Any, Sequence
 
 if TYPE_CHECKING:  # только для аннотаций — модуль тянет httpx, не нужный CSV-пути
+    from src.domain.pdf_metadata import PdfHead
     from src.infrastructure.external.landing import LandingData
     from src.infrastructure.external.oai import OaiRecord
 
 from slugify import slugify
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
+from src.core.config import settings
 from src.domain.article import ArticleDomain
 from src.infrastructure.persistence.models import (
     Article,
     ImportItem,
     ImportJob,
     Issue,
+    Journal,
 )
+
+logger = logging.getLogger(__name__)
 
 # Потолок на задачу: один клиент не должен занять обработчик на часы.
 MAX_ITEMS_PER_JOB = 2000
+# Потолок файлов в одной загрузке папки: самый толстый выпуск на платформе —
+# 262 статьи, а каждый файл стоит запроса к модели.
+MAX_FOLDER_FILES = 300
+# Загрузку папки считаем оборванной позже импорта архивов: пачка файлов ждёт
+# модель (таймаут 300 с, повторы с паузой), а отметка живости обновляется
+# только между пачками.
+FOLDER_STALE_AFTER_SECONDS = 20 * 60
+# Замечания, которые пересчитываются заново при каждой проверке задачи.
+_RECOMPUTED_CODES = {"duplicate", "page_conflict"}
 # Размер пачки при применении. Транзакция на пачку, а не на всю задачу: 300
 # статей одной транзакцией держат блокировки минутами и рвутся целиком.
 APPLY_CHUNK = 25
@@ -424,6 +448,45 @@ def source_key_of(row: dict[str, Any], parsed: dict[str, Any]) -> str:
     return "row:" + hashlib.sha1(base.encode("utf-8")).hexdigest()[:20]
 
 
+@dataclass(frozen=True)
+class FolderTarget:
+    """Выпуск, в который грузится папка, — простыми значениями."""
+
+    issue_id: int
+    year: int | None
+    volume: str | None
+    number: str | None
+    journal_issns: frozenset[str]
+    conference: bool
+
+
+def file_key(content: bytes) -> str:
+    """Ключ строки папки — хеш содержимого: тот же файл дважды не заводим."""
+    return "sha1:" + hashlib.sha1(content).hexdigest()
+
+
+def extract_status_of(item: ImportItem) -> str | None:
+    return ((item.raw or {}).get("extract") or {}).get("status")
+
+
+def item_public(item: ImportItem, extract_status: str | None) -> dict[str, Any]:
+    """Строка для ответа API. Статус распознавания передаётся отдельно:
+    список грузит строки без `raw` (там текст страниц), а он лежит именно там."""
+    return {
+        "id": item.id,
+        "job_id": item.job_id,
+        "source_key": item.source_key,
+        "parsed": item.parsed or {},
+        "issue_key": item.issue_key,
+        "status": item.status,
+        "problems": item.problems or [],
+        "article_id": item.article_id,
+        "pdf_source": item.pdf_source,
+        "pdf_url": item.pdf_url,
+        "extract_status": extract_status,
+    }
+
+
 class ImportDomain:
     """Операции над задачей импорта. Права проверяет транспортный слой."""
 
@@ -737,11 +800,22 @@ class ImportDomain:
         )
 
         existing_dois, existing_titles = await self._existing_keys(db, job.journal_id)
+        page_conflicts = (
+            await self._folder_page_conflicts(db, job, items)
+            if job.source_type == "folder"
+            else {}
+        )
 
         for item in items:
             parsed = item.parsed or {}
-            problems = [p for p in (item.problems or []) if p.get("code") != "duplicate"]
-            status = "invalid" if problems else "pending"
+            problems = [
+                p for p in (item.problems or []) if p.get("code") not in _RECOMPUTED_CODES
+            ]
+            problems.extend(page_conflicts.get(item.id, []))
+            # Предупреждения (severity = warning) импорт не останавливают. Их
+            # ставит только загрузка папки; у таблицы и OAI замечания блокирующие.
+            blocking = [p for p in problems if p.get("severity") != "warning"]
+            status = "invalid" if blocking else "pending"
 
             doi = parsed.get("doi")
             title_key = normalize_title(parsed.get("title"))
@@ -819,6 +893,20 @@ class ImportDomain:
                 )
             ).scalar_one()
         )
+        if job.source_type == "folder":
+            # Строки, которые модель ещё читает: по статусу они pending, но
+            # создавать их рано — экран показывает их отдельным счётчиком.
+            totals["extracting"] = int(
+                (
+                    await db.execute(
+                        select(func.count(ImportItem.id)).where(
+                            ImportItem.job_id == job.id,
+                            ImportItem.status != "created",
+                            ImportItem.raw["extract"]["status"].astext == "queued",
+                        )
+                    )
+                ).scalar_one()
+            )
         job.totals = totals
         if job.status in ("parsing", "draft"):
             job.status = "ready"
@@ -850,15 +938,23 @@ class ImportDomain:
 
     # ------------------------------------------------------------ применение
     async def apply(
-        self, db: AsyncSession, job: ImportJob, item_ids: Sequence[int] | None = None
+        self,
+        db: AsyncSession,
+        job: ImportJob,
+        item_ids: Sequence[int] | None = None,
+        *,
+        claimed: bool = False,
     ) -> dict[str, Any]:
         """Создать выпуски и статьи по готовым кандидатам.
 
         Обрабатываются `pending` и `failed` (последние — чтобы «Повторить
         неудавшиеся» не требовало новой задачи). `duplicate`, `invalid` и
         `skipped` не трогаем: их клиент либо исправил, либо сознательно оставил.
+
+        `claimed` — задачу уже заняла ручка (выставила статус и отметку живости
+        до ухода в фон), и проверка «не занята ли» сочла бы занятой её саму.
         """
-        if job.status == "applying" and not self._is_stale(job):
+        if not claimed and job.status == "applying" and not self._is_stale(job):
             raise JobBusy("Импорт уже идёт")
 
         job.status = "applying"
@@ -897,11 +993,11 @@ class ImportDomain:
 
         return {"created": created, "failed": failed}
 
-    def _is_stale(self, job: ImportJob) -> bool:
+    def _is_stale(self, job: ImportJob, seconds: int = STALE_AFTER_SECONDS) -> bool:
         if job.heartbeat_at is None:
             return True
         age = datetime.now(timezone.utc) - job.heartbeat_at
-        return age.total_seconds() > STALE_AFTER_SECONDS
+        return age.total_seconds() > seconds
 
     async def _next_batch(
         self, db: AsyncSession, job: ImportJob, item_ids: Sequence[int] | None
@@ -914,6 +1010,12 @@ class ImportDomain:
         )
         if item_ids:
             stmt = stmt.where(ImportItem.id.in_(list(item_ids)))
+        if job.source_type == "folder":
+            # Файл, который модель ещё не прочитала, создавать рано: у него
+            # нет ни названия, ни авторов.
+            stmt = stmt.where(
+                func.coalesce(ImportItem.raw["extract"]["status"].astext, "") != "queued"
+            )
         return list((await db.execute(stmt)).scalars().all())
 
     async def _enrich_from_landing(self, job: ImportJob, item: ImportItem) -> None:
@@ -979,6 +1081,8 @@ class ImportDomain:
     async def _create_article(
         self, db: AsyncSession, job: ImportJob, item: ImportItem
     ) -> Article:
+        if job.source_type == "folder":
+            return await self._create_folder_article(db, job, item)
         if job.source_type == "oai":
             # Дорогой шаг (два внешних запроса), поэтому здесь, а не при разборе:
             # платим только за статьи, которые действительно импортируют.
@@ -1053,6 +1157,449 @@ class ImportDomain:
         await db.flush()
         return issue
 
+    # ------------------------------------------------------------ папка PDF
+    async def folder_target(self, db: AsyncSession, job: ImportJob) -> FolderTarget:
+        """Выпуск, в который грузится папка, — снимком простых значений.
+
+        Снимок, а не ORM-строки: распознавание коммитит после каждой пачки
+        файлов, и держать между коммитами живые объекты выпуска незачем.
+        """
+        issue_id = (job.params or {}).get("issue_id")
+        issue = None
+        if issue_id:
+            issue = (
+                await db.execute(select(Issue).where(Issue.id == int(issue_id)))
+            ).scalars().first()
+        if issue is None:
+            raise ImportError_("Выпуск этой загрузки не найден — возможно, его удалили")
+        journal = (
+            await db.execute(select(Journal).where(Journal.id == issue.journal_id))
+        ).scalars().first()
+        issns = frozenset(
+            (value or "").replace("–", "-").upper()
+            for value in ((journal.issn, journal.printed_issn) if journal else ())
+            if value
+        )
+        return FolderTarget(
+            issue_id=issue.id,
+            year=issue.year,
+            volume=issue.volume,
+            number=issue.issue,
+            journal_issns=issns,
+            conference=bool(journal and journal.type == "conference_series"),
+        )
+
+    async def folder_precheck(
+        self, db: AsyncSession, job: ImportJob, content: bytes
+    ) -> ImportItem | None:
+        """Тот же файл уже в загрузке? Проверяется ДО записи в хранилище."""
+        found = (
+            await db.execute(
+                select(ImportItem).where(
+                    ImportItem.job_id == job.id, ImportItem.source_key == file_key(content)
+                )
+            )
+        ).scalars().first()
+        if found is not None:
+            return found
+        count = int(
+            (
+                await db.execute(
+                    select(func.count(ImportItem.id)).where(ImportItem.job_id == job.id)
+                )
+            ).scalar_one()
+        )
+        if count >= MAX_FOLDER_FILES:
+            raise ImportError_(
+                f"В одну загрузку — не больше {MAX_FOLDER_FILES} файлов. "
+                "Остальные загрузите следующей порцией."
+            )
+        return None
+
+    async def add_folder_file(
+        self,
+        db: AsyncSession,
+        job: ImportJob,
+        *,
+        filename: str,
+        content: bytes,
+        url: str,
+        head: "PdfHead",
+    ) -> ImportItem:
+        """Принять файл: сохранить текст первых страниц и то, что нашёл regex.
+
+        Модель здесь не вызывается — это секунды на файл, а ручка загрузки
+        должна отвечать сразу. Распознавание идёт отдельным фоновым шагом
+        (`extract_folder`); текст для него лежит в `raw`, и второй раз качать
+        файл из хранилища не нужно — он же нужен для сверки после правок.
+        """
+        from src.domain import pdf_metadata
+
+        if job.status in ("parsing", "applying") and not self._is_stale(
+            job, FOLDER_STALE_AFTER_SECONDS
+        ):
+            raise JobBusy("Файлы этой загрузки уже обрабатываются — начните новую загрузку")
+        target = await self.folder_target(db, job)
+        job_id = job.id
+        key = file_key(content)
+        regex = pdf_metadata.regex_layer(head)
+        item = ImportItem(
+            job_id=job_id,
+            source_key=key,
+            raw={
+                "filename": filename,
+                "size": len(content),
+                "total_pages": head.total_pages,
+                "pdf_info": head.info,
+                "regex": regex,
+                "pages_text": pdf_metadata.pages_for_storage(head),
+                "extract": {
+                    "status": pdf_metadata.EXTRACT_QUEUED
+                    if head.has_text
+                    else pdf_metadata.EXTRACT_NO_TEXT
+                },
+            },
+            parsed={"pages": regex["pages"] or None},
+            status="pending",
+            problems=[],
+            pdf_source=filename,
+            pdf_url=url,
+        )
+        self._folder_rebuild(item, target)
+        db.add(item)
+        try:
+            await db.commit()
+        except IntegrityError:
+            # Тот же файл пришёл параллельной загрузкой: UNIQUE (job_id, source_key).
+            # Откат гасит ВСЕ объекты сессии, в том числе задачу у вызывающего, —
+            # возвращаем её в рабочее состояние, иначе следующее обращение к
+            # job.status уедет в ленивую загрузку вне greenlet.
+            await db.rollback()
+            await db.refresh(job)
+            existing = (
+                await db.execute(
+                    select(ImportItem).where(
+                        ImportItem.job_id == job_id, ImportItem.source_key == key
+                    )
+                )
+            ).scalars().first()
+            if existing is None:
+                raise
+            return existing
+        await self._recount(db, job)
+        await db.commit()
+        await db.refresh(item)
+        return item
+
+    def _folder_rebuild(
+        self,
+        item: ImportItem,
+        target: FolderTarget,
+        parsed: dict[str, Any] | None = None,
+        *,
+        keep_skipped: bool = True,
+    ) -> None:
+        """Пересобрать поля и замечания строки папки.
+
+        Год, том и номер — от выпуска: редактор грузит папку в конкретный
+        номер, и колонтитул PDF здесь не главнее его выбора.
+        """
+        from src.domain import pdf_metadata
+
+        source = dict((item.parsed or {}) if parsed is None else parsed)
+        raw = item.raw or {}
+        extract = raw.get("extract") or {}
+        rebuilt, problems = build_parsed(
+            {
+                **source,
+                "year": target.year,
+                "volume": target.volume,
+                "issue": target.number,
+                "doi": None,
+            }
+        )
+        if target.year and not rebuilt.get("publication_year"):
+            # Выпуск на будущий год build_parsed не принял бы, но выбор
+            # выпуска — решение редактора, а не ошибка в данных.
+            problems = [p for p in problems if p.get("field") != "year"]
+            rebuilt["publication_year"] = target.year
+        # Поля, которых build_parsed не знает (pdf_meta, confirmed), не теряем.
+        rebuilt = {**{k: v for k, v in source.items() if k not in rebuilt}, **rebuilt}
+
+        if extract.get("status") == pdf_metadata.EXTRACT_QUEUED:
+            # Модель ещё не читала файл — судить о полях рано.
+            problems = []
+        else:
+            problems += pdf_metadata.check_fields(
+                rebuilt,
+                pages_text=list(raw.get("pages_text") or []),
+                total_pages=int(raw.get("total_pages") or 0),
+                extract=extract,
+                regex=raw.get("regex") or {},
+                issue_volume=target.volume,
+                issue_number=target.number,
+                journal_issns=set(target.journal_issns),
+            )
+
+        item.parsed = rebuilt
+        item.problems = problems
+        item.issue_key = issue_key_of(
+            rebuilt.get("publication_year"), rebuilt.get("volume"), rebuilt.get("issue")
+        )
+        if item.status == "created" or (keep_skipped and item.status == "skipped"):
+            return
+        blocking = any(p.get("severity") != pdf_metadata.WARNING for p in problems)
+        item.status = "invalid" if blocking else "pending"
+
+    async def extract_folder(self, db: AsyncSession, job: ImportJob) -> dict[str, int]:
+        """Прочитать моделью все принятые, но ещё не распознанные файлы.
+
+        Запросы к модели идут пачками по IMPORT_EXTRACT_CONCURRENCY
+        параллельно, а запись в базу — последовательно: одна AsyncSession не
+        переносит конкурентного использования. Отметка живости обновляется
+        после каждой пачки, так что оборванный рестартом прогон продолжается
+        той же кнопкой с того файла, на котором встал.
+        """
+        from src.domain import pdf_metadata
+
+        target = await self.folder_target(db, job)
+        job_id = job.id
+        size = max(1, settings.IMPORT_EXTRACT_CONCURRENCY)
+        counts = {"extracted": 0, "not_extracted": 0}
+        queued = ImportItem.raw["extract"]["status"].astext == pdf_metadata.EXTRACT_QUEUED
+        while True:
+            batch = list(
+                (
+                    await db.execute(
+                        select(ImportItem)
+                        .where(ImportItem.job_id == job_id, queued)
+                        .order_by(ImportItem.id)
+                        .limit(size)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if not batch:
+                break
+            results = await asyncio.gather(
+                *(
+                    self._extract_pages(list((item.raw or {}).get("pages_text") or []))
+                    for item in batch
+                )
+            )
+            for item, result in zip(batch, results):
+                item.raw = {**(item.raw or {}), "extract": result["extract"]}
+                parsed = dict(item.parsed or {})
+                for key, value in (result.get("fields") or {}).items():
+                    # Только пустое: правку редактора модель не перебивает.
+                    if value and not parsed.get(key):
+                        parsed[key] = value
+                self._folder_rebuild(item, target, parsed)
+                done = result["extract"]["status"] == pdf_metadata.EXTRACT_DONE
+                counts["extracted" if done else "not_extracted"] += 1
+            job.heartbeat_at = datetime.now(timezone.utc)
+            await db.commit()
+
+        await self.revalidate(db, job)
+        return counts
+
+    async def _extract_pages(self, pages: list[str]) -> dict[str, Any]:
+        """Один файл через модель, с повторами. В базу не пишет."""
+        from src.domain import pdf_metadata
+        from src.infrastructure.external import llm
+
+        at = datetime.now(timezone.utc).isoformat()
+        if not llm.configured():
+            return {"extract": {"status": pdf_metadata.EXTRACT_NO_MODEL, "at": at}}
+
+        attempts = max(1, settings.IMPORT_EXTRACT_ATTEMPTS)
+        error = ""
+        for attempt in range(attempts):
+            try:
+                parsed = await pdf_metadata.llm_layer(pages)
+            except llm.LLMNotConfigured:
+                return {"extract": {"status": pdf_metadata.EXTRACT_NO_MODEL, "at": at}}
+            except Exception as e:  # 429, 5xx, таймаут, битый JSON — повторяем
+                error = str(e)[:300]
+                logger.warning("folder import: модель не разобрала файл (%s): %s", attempt + 1, error)
+                if attempt + 1 < attempts:
+                    # Бесплатные тарифы режут частоту — даём окну сброситься.
+                    await asyncio.sleep(15 * (attempt + 1))
+                continue
+            return {
+                "extract": {
+                    "status": pdf_metadata.EXTRACT_DONE,
+                    "at": at,
+                    "model": pdf_metadata.model_name(),
+                },
+                "fields": pdf_metadata.to_fields(parsed),
+            }
+        return {
+            "extract": {
+                "status": pdf_metadata.EXTRACT_FAILED,
+                "at": at,
+                "model": pdf_metadata.model_name(),
+                "error": error,
+            }
+        }
+
+    async def _folder_page_conflicts(
+        self, db: AsyncSession, job: ImportJob, items: list[ImportItem]
+    ) -> dict[int, list[dict[str, str]]]:
+        """Страницы кандидатов против статей выпуска и друг друга.
+
+        Автопроверка выпуска считает совпадение диапазона один в один
+        признаком дубля (major) и гасит номер — ловим это до создания статей,
+        пока редактор может поправить страницы. Частичное перекрытие бывает от
+        кривой пагинации, оно только предупреждение.
+        """
+        from src.domain import issue_checks
+
+        issue_id = (job.params or {}).get("issue_id")
+        rows = (
+            (
+                await db.execute(
+                    select(Article.title, Article.pages).where(Article.issue_id == int(issue_id))
+                )
+            ).all()
+            if issue_id
+            else []
+        )
+        taken: list[tuple[str, str, tuple[int, int], ImportItem | None]] = [
+            (title or "", pages, span)
+            + (None,)
+            for title, pages in rows
+            if (span := issue_checks.page_range(pages))
+        ]
+        for item in items:
+            parsed = item.parsed or {}
+            span = issue_checks.page_range(parsed.get("pages"))
+            if span and item.status != "skipped":
+                taken.append((parsed.get("title") or item.pdf_source or "", parsed["pages"], span, item))
+
+        found: dict[int, list[dict[str, str]]] = {}
+        for title, pages, span, item in taken:
+            if item is None:
+                continue
+            for other_title, other_pages, other_span, other in taken:
+                if other is item or not (span[0] <= other_span[1] and other_span[0] <= span[1]):
+                    continue
+                exact = span == other_span
+                label = f"«{other_title[:80]}»" if other_title else "другой статьи"
+                found.setdefault(item.id, []).append(
+                    {
+                        "field": "pages",
+                        "code": "page_conflict",
+                        "message": (
+                            f"Страницы {pages} уже заняты статьёй {label}"
+                            if exact
+                            else f"Страницы {pages} пересекаются со статьёй {label} (с. {other_pages})"
+                        ),
+                        "severity": "blocking" if exact else "warning",
+                    }
+                )
+        return found
+
+    async def _create_folder_article(
+        self, db: AsyncSession, job: ImportJob, item: ImportItem
+    ) -> Article:
+        """Статья из файла папки — в выбранный выпуск, через автопроверку."""
+        from src.domain import ai_review
+
+        target = await self.folder_target(db, job)
+        parsed = item.parsed or {}
+        review = settings.REVIEW_ACTIVE
+        meta: dict[str, Any] = {
+            "import": {
+                "job_id": job.id,
+                "source": item.source_key,
+                "source_ref": item.pdf_source,
+                "imported_at": datetime.now(timezone.utc).isoformat(),
+            }
+        }
+        if parsed.get("pdf_meta"):
+            # Аффилиации, e-mail, третий язык, УДК — колонок под них нет.
+            meta["pdf_meta"] = parsed["pdf_meta"]
+
+        article = Article(
+            issue_id=target.issue_id,
+            title=parsed.get("title"),
+            title_foreign=parsed.get("title_foreign"),
+            authors=parsed.get("authors"),
+            annotation=parsed.get("annotation"),
+            annotation_foreign=parsed.get("annotation_foreign"),
+            keywords=parsed.get("keywords"),
+            keywords_foreign=parsed.get("keywords_foreign"),
+            pages=parsed.get("pages"),
+            publication_year=parsed.get("publication_year"),
+            data=parse_date(parsed.get("data")),
+            pdf=item.pdf_url,
+            publication_type="conference_paper" if target.conference else "article",
+            # Как статья из формы: при включённой автопроверке — черновик в
+            # очереди, без неё — сразу на сайте.
+            published=not review,
+            admin_id=job.created_by,
+            slug=await self.articles._unique_slug(db, parsed.get("title") or "article"),
+            created_at=self.articles.get_current_time(),
+            meta=meta,
+        )
+        if review:
+            # Та же очередь, что у формы: через AI_REVIEW_DELAY_MINUTES после
+            # последней статьи выпуска планировщик сверит всё и опубликует или
+            # погасит номер.
+            ai_review.queue_article(article)
+        db.add(article)
+        await db.flush()
+
+        item.article_id = article.id
+        item.status = "created"
+        return article
+
+    async def folder_items(
+        self,
+        db: AsyncSession,
+        job_id: int,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Строки загрузки без `raw`: в нём текст страниц, до 20 КБ на файл,
+        а экран опрашивает список каждые несколько секунд."""
+        base = select(ImportItem).where(ImportItem.job_id == job_id)
+        if status:
+            base = base.where(ImportItem.status == status)
+        total = int(
+            (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
+        )
+        rows = (
+            await db.execute(
+                base.options(defer(ImportItem.raw))
+                .add_columns(ImportItem.raw["extract"]["status"].astext)
+                .order_by(ImportItem.id)
+                .limit(limit)
+                .offset(offset)
+            )
+        ).all()
+        return [item_public(item, extract) for item, extract in rows], total
+
+    async def created_article_ids(self, db: AsyncSession, job_id: int) -> list[int]:
+        return [
+            int(article_id)
+            for article_id in (
+                await db.execute(
+                    select(ImportItem.article_id)
+                    .where(ImportItem.job_id == job_id, ImportItem.article_id.isnot(None))
+                    # В порядке загрузки: обложки рисуются по этому списку, и
+                    # редактор видит их появляющимися сверху вниз, как в папке.
+                    .order_by(ImportItem.id)
+                )
+            )
+            .scalars()
+            .all()
+        ]
+
     # ---------------------------------------------------------------- прочее
     async def set_item(
         self,
@@ -1069,7 +1616,15 @@ class ImportDomain:
             raise JobNotFound("Строка импорта не найдена")
         if item.status == "created":
             raise ImportError_("Строка уже импортирована — правьте саму статью")
-        if parsed is not None:
+        job = await self.get_job(db, item.job_id) if parsed is not None else None
+        if job is not None and job.source_type == "folder":
+            # Строка папки: год, том и номер остаются от выпуска, а правка
+            # заново сверяется с текстом файла.
+            target = await self.folder_target(db, job)
+            self._folder_rebuild(
+                item, target, {**(item.parsed or {}), **parsed}, keep_skipped=False
+            )
+        elif parsed is not None:
             merged = {**(item.parsed or {}), **parsed}
             # Прогоняем через тот же разбор, что и при загрузке: правка руками
             # не должна обходить нормализацию DOI и проверку года.

@@ -7,11 +7,12 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import get_current_profile, require_owner
 from src.domain.authors import AuthorCardDomain, AuthorCardError
+from src.domain.notifications import send_claim_approved, send_claim_rejected
 from src.infrastructure.persistence.db import get_db
 from src.infrastructure.persistence.models import Profile
 
@@ -37,31 +38,40 @@ async def list_claims(
 @router.post("/claims/{claim_id}/approve")
 async def approve_claim(
     claim_id: str,
+    background: BackgroundTasks,
     reason: str | None = Body(None, embed=True),
     db: AsyncSession = Depends(get_db),
     owner: Profile = Depends(require_owner),
 ):
     try:
-        return await domain.decide_claim(
+        result = await domain.decide_claim(
             db, claim_id, approve=True, decided_by=str(owner.id), reason=reason
         )
     except AuthorCardError as err:
         raise _bad(err) from err
+    # Письмо автору — фоном, после ответа: без него человек не узнает, что
+    # профиль готов, а сбой почты не должен отменять само одобрение.
+    background.add_task(send_claim_approved, claim_id)
+    return result
 
 
 @router.post("/claims/{claim_id}/reject")
 async def reject_claim(
     claim_id: str,
+    background: BackgroundTasks,
     reason: str | None = Body(None, embed=True),
     db: AsyncSession = Depends(get_db),
     owner: Profile = Depends(require_owner),
 ):
     try:
-        return await domain.decide_claim(
+        result = await domain.decide_claim(
             db, claim_id, approve=False, decided_by=str(owner.id), reason=reason
         )
     except AuthorCardError as err:
         raise _bad(err) from err
+    # С причиной и подсказкой, чем подтвердить авторство при повторной заявке.
+    background.add_task(send_claim_rejected, claim_id)
+    return result
 
 
 @router.get("/")

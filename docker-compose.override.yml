@@ -4,5 +4,12 @@
 # только для контейнера.
 services:
   api:
+    # R2-ключи лежат в .env.local (в .env их нет), а базовый compose грузит
+    # только .env — без этой строки контейнер отдавал 503 "Storage not
+    # configured" на /pdf/<slug>, а фронт превращал его в 502.
+    env_file:
+      - .env
+      - path: .env.local
+        required: false
     environment:
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/scientific_db

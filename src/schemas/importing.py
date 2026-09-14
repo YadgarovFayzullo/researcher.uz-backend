@@ -42,6 +42,9 @@ class ImportItemPublic(BaseModel):
     article_id: int | None = None
     pdf_source: str | None = None
     pdf_url: str | None = None
+    # Только у загрузки папки: queued | done | failed | no_text | no_model
+    # (см. src/domain/pdf_metadata.py). Пока queued, строка ещё распознаётся.
+    extract_status: str | None = None
 
 
 class ImportItemsPage(BaseModel):
@@ -54,6 +57,18 @@ class ImportItemUpdate(BaseModel):
 
     parsed: dict[str, Any] | None = None
     status: str | None = None
+
+
+class FolderJobCreate(BaseModel):
+    """Загрузка папки PDF в выпуск: журнал и права выводятся из выпуска."""
+
+    issue_id: int
+
+
+class FolderFileResult(BaseModel):
+    item: ImportItemPublic
+    # Тот же файл уже есть в этой загрузке — второй раз его не заводили.
+    duplicate: bool = False
 
 
 class ImportApplyRequest(BaseModel):

@@ -389,6 +389,21 @@ class AuthorCardDomain:
                 .where(ArticleAuthor.author_id == author.id)
                 .values(profile_id=claim.profile_id)
             )
+            # Пока заявка ждала решения, человек мог прикрепить те же статьи в
+            # кабинете — там заводится своя строка авторства с именем из
+            # профиля и без карточки. После привязки подписи она дублирует её:
+            # статья показывалась в профиле дважды, а в соавторах человек стоял
+            # два раза под разными написаниями. Подпись из статьи первична.
+            card_articles = select(ArticleAuthor.article_id).where(
+                ArticleAuthor.author_id == author.id
+            )
+            await db.execute(
+                ArticleAuthor.__table__.delete().where(
+                    ArticleAuthor.profile_id == claim.profile_id,
+                    ArticleAuthor.author_id.is_(None),
+                    ArticleAuthor.article_id.in_(card_articles),
+                )
+            )
             # Остальные открытые заявки на эту карточку теряют смысл.
             await db.execute(
                 AuthorClaim.__table__.update()

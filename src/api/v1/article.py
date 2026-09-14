@@ -2,6 +2,7 @@ import logging
 
 from fastapi import BackgroundTasks, Depends, APIRouter, HTTPException, status
 from fastapi.concurrency import run_in_threadpool
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
 
@@ -195,10 +196,49 @@ async def delete_article(
     # Слаг читаем до удаления: после него строки уже нет, а фронту он нужен —
     # иначе страница удалённой статьи продолжит отдаваться из ISR-кэша неделю.
     slug = existing.slug
-    deleted = await domain.delete_article(db, id)
+    deleted = await domain.delete_articles(db, [id], deleted_by=profile.id) > 0
     if not deleted:
         raise HTTPException(status_code=404, detail="Article not found")
     return {"status": "deleted", "revalidate_slugs": [slug] if slug else []}
+
+
+class BulkDeleteRequest(BaseModel):
+    # Потолок совпадает с MAX_SLUGS у /api/revalidate фронта: больше слагов
+    # сброс кэша не примет, и хвост удалённых висел бы на сайте из ISR.
+    ids: list[int] = Field(min_length=1, max_length=200)
+
+
+@router.post("/bulk-delete")
+async def bulk_delete_articles(
+    body: BulkDeleteRequest,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(get_current_profile),
+):
+    """Удалить несколько статей разом — массовое удаление в админке выпуска.
+
+    Всё или ничего: если хоть на одну статью прав нет, не удаляется ни одна.
+    Иначе редактор получил бы наполовину выполненную операцию и не понял бы,
+    что осталось. Уже удалённые кем-то id молча пропускаем.
+    """
+    rows = (
+        await db.execute(select(Article).where(Article.id.in_(set(body.ids))))
+    ).scalars().all()
+    for row in rows:
+        allowed = await can_write_article(
+            db,
+            role=profile.role,
+            user_id=profile.id,
+            issue_id=row.issue_id,
+            admin_id=row.admin_id,
+            publisher_id=row.publisher_id,
+        )
+        if not allowed:
+            raise _forbidden()
+    slugs = [row.slug for row in rows if row.slug]
+    deleted = await domain.delete_articles(
+        db, [row.id for row in rows], deleted_by=profile.id
+    )
+    return {"status": "deleted", "deleted": deleted, "revalidate_slugs": slugs}
 
 
 class TakedownRequest(BaseModel):

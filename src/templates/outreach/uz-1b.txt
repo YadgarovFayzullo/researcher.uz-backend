@@ -1,0 +1,26 @@
+Assalomu alaykum, $name!
+
+Sizning «$article» maqolangiz ($article_url) «$journal» jurnalida chop etilgan va researcher.uz ilmiy platformasida joylashtirilgan.
+
+Maqoladagi imzo asosida muallif sahifangizni yaratdik:
+
+$site/uz/author/$slug
+
+Hozircha unda bitta ish bor. «Bu men» tugmasini bosing — tizimga kirib, qisqa tekshiruvdan so'ng sahifa sizning olim profilingizga aylanadi:
+— ORCID'ni ulang — boshqa jurnallardagi nashrlaringiz profilga qo'shiladi;
+— ish joyingizni va ismingiz qanday yozilishini ko'rsating;
+— iqtiboslar va h-indeks avtomatik hisoblanadi.
+
+Ikki va undan ortiq ishi bor profil Google va Google Scholar uchun ochiladi — hamkasblar va taqrizchilar sizni shu orqali topadi.
+
+Sahifani ochish:
+$site/uz/author/$slug
+
+Agar maqola sizniki bo'lmasa — xatga javob yozing, manzilni o'chiramiz.
+
+Hurmat bilan,
+$signature
+
+--
+Ushbu xat sizga platformada chop etilgan maqolada bog'lanish uchun ko'rsatilgan manzil bo'yicha yuborildi.
+Obunani bekor qilish: $unsubscribe

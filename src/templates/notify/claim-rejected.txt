@@ -1,0 +1,14 @@
+Assalomu alaykum, $name!
+
+«$author_name» muallif sahifasini profilingizga biriktirish bo'yicha arizangiz hozircha tasdiqlanmadi.
+
+$reason
+
+Arizani qayta berish mumkin: sahifadagi «Bu men» tugmasini bosing va izohda mualliflikni tasdiqlovchi ma'lumot yozing — ish joyingiz, maqolada ko'rsatilgan e-pochta yoki ORCID havolasi.
+
+$url
+
+Agar bu xato deb hisoblasangiz, shu xatga javob yozing.
+
+Hurmat bilan,
+$signature

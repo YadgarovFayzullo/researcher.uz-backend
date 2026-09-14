@@ -1,0 +1,16 @@
+Assalomu alaykum, $name!
+
+Bir hafta oldin researcher.uz'da muallif sahifangiz tayyorlanganini yozgan edik. U hamon tasdiqlanmagan:
+
+$site/uz/author/$slug
+
+Sahifa biriktirilmagunicha unda ismingiz maqola ostidagi imzoda qanday yozilgan bo'lsa, shunday turadi — bu esa ko'pincha jurnaldan jurnalga farq qiladi. Tasdiqlagandan so'ng ism, ish joyi va ORCID'ni o'zingiz ko'rsatasiz.
+
+Sahifani olish: $site/uz/author/$slug
+
+Hurmat bilan,
+$signature
+
+--
+Sahifa kerak bo'lmasa — bitta tugma bilan obunani bekor qiling, boshqa xat bo'lmaydi:
+$unsubscribe

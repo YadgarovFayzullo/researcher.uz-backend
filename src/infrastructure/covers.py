@@ -17,6 +17,7 @@ import time
 
 from slugify import slugify
 
+from src.infrastructure.pdf_text import PDFIUM_LOCK
 from src.infrastructure.storage import (
     StorageNotConfigured,
     key_from_url,
@@ -42,26 +43,32 @@ def render_first_page(pdf_bytes: bytes) -> bytes | None:
         return None
 
     doc = None
-    try:
-        doc = pdfium.PdfDocument(pdf_bytes)
-        if len(doc) == 0:
+    # Общий с pdf_text замок: PDFium не потокобезопасен, а обложка рендерится
+    # фоновой задачей ровно тогда, когда автопроверка читает текст тех же
+    # файлов. Два потока в библиотеке одновременно роняют весь процесс
+    # (повреждение памяти в FPDF_LoadPage), причём воркер uvicorn уносит с
+    # собой все запросы, которые в этот момент обслуживал.
+    with PDFIUM_LOCK:
+        try:
+            doc = pdfium.PdfDocument(pdf_bytes)
+            if len(doc) == 0:
+                return None
+            page = doc[0]
+            width = page.get_width() or COVER_WIDTH
+            scale = COVER_WIDTH / width
+            image = page.render(scale=scale).to_pil().convert("RGB")
+            buf = io.BytesIO()
+            image.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+            return buf.getvalue()
+        except Exception:
+            logger.exception("Не удалось отрисовать первую страницу PDF")
             return None
-        page = doc[0]
-        width = page.get_width() or COVER_WIDTH
-        scale = COVER_WIDTH / width
-        image = page.render(scale=scale).to_pil().convert("RGB")
-        buf = io.BytesIO()
-        image.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
-        return buf.getvalue()
-    except Exception:
-        logger.exception("Не удалось отрисовать первую страницу PDF")
-        return None
-    finally:
-        if doc is not None:
-            try:
-                doc.close()
-            except Exception:
-                pass
+        finally:
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
 
 
 def build_cover_key(base_name: str) -> str:

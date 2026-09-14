@@ -107,6 +107,19 @@ async def update_my_profile(
     )
 
 
+@router.get("/me/author-suggestions")
+async def author_suggestions(
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(get_current_profile),
+):
+    """Карточки авторов, похожие на ФИО профиля, — баннер «возможно, это ваши работы».
+
+    Ничего не привязывает: фронт ведёт на карточку, где подаётся обычная заявка
+    «Это я» с решением владельца.
+    """
+    return await domain.suggest_author_cards(db, user_id=profile.id)
+
+
 @router.post("/me/claim/{article_id}", status_code=204)
 async def claim_article(
     article_id: int,

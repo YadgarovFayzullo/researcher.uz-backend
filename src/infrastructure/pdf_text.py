@@ -19,8 +19,17 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 
 logger = logging.getLogger(__name__)
+
+# pypdfium2 (а точнее сам PDFium) НЕ потокобезопасен: два потока, открывающие
+# документы одновременно, роняют процесс на повреждении памяти в аллокаторе
+# («BUG IN CLIENT OF LIBMALLOC» в FPDF_LoadPage). Ловится не сразу: на одном
+# файле всё работает, падение приходит на параллельной проверке выпуска.
+# Поэтому любой доступ к библиотеке — через один общий замок; он же
+# импортируется рендерером обложек, чтобы блокировка была одна на процесс.
+PDFIUM_LOCK = threading.Lock()
 
 # Больше этого в одну проверку не берём: диссертация на 300 страниц раздувает и
 # извлечение, и число шинглов, а для решения хватает основного объёма.
@@ -59,25 +68,26 @@ def extract_text(pdf_bytes: bytes, *, max_pages: int = MAX_PAGES) -> str:
 
     doc = None
     parts: list[str] = []
-    try:
-        doc = pdfium.PdfDocument(pdf_bytes)
-        for index in range(min(len(doc), max_pages)):
-            page = doc[index]
-            textpage = page.get_textpage()
-            try:
-                parts.append(textpage.get_text_range() or "")
-            finally:
-                textpage.close()
-                page.close()
-    except Exception:
-        logger.exception("Не удалось извлечь текст из PDF")
-        return ""
-    finally:
-        if doc is not None:
-            try:
-                doc.close()
-            except Exception:
-                pass
+    with PDFIUM_LOCK:
+        try:
+            doc = pdfium.PdfDocument(pdf_bytes)
+            for index in range(min(len(doc), max_pages)):
+                page = doc[index]
+                textpage = page.get_textpage()
+                try:
+                    parts.append(textpage.get_text_range() or "")
+                finally:
+                    textpage.close()
+                    page.close()
+        except Exception:
+            logger.exception("Не удалось извлечь текст из PDF")
+            return ""
+        finally:
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass
 
     return "\n".join(parts)
 
@@ -159,3 +169,31 @@ def strip_running_heads(text: str) -> str:
 def pdf_to_checkable_text(pdf_bytes: bytes) -> str:
     """PDF → текст, готовый к сравнению: без вёрстки, колонтитулов и библиографии."""
     return strip_references(strip_running_heads(clean_text(extract_text(pdf_bytes))))
+
+
+def page_count(pdf_bytes: bytes) -> int:
+    """Сколько страниц в файле. 0 — файл не открылся.
+
+    Нужно ИИ-проверке выпуска: главный признак подделанной пагинации — «1-N»,
+    где N ровно равно числу страниц файла (редактор вписал объём PDF вместо
+    страниц в номере журнала).
+    """
+    try:
+        import pypdfium2 as pdfium
+    except ImportError:  # pragma: no cover — зависимость есть в requirements
+        return 0
+
+    doc = None
+    with PDFIUM_LOCK:
+        try:
+            doc = pdfium.PdfDocument(pdf_bytes)
+            return len(doc)
+        except Exception:
+            logger.exception("Не удалось открыть PDF для подсчёта страниц")
+            return 0
+        finally:
+            if doc is not None:
+                try:
+                    doc.close()
+                except Exception:
+                    pass

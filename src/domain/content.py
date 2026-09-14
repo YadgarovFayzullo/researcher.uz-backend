@@ -24,6 +24,7 @@ from src.infrastructure.persistence.models import (
     ConferenceSection,
     Issue,
     Journal,
+    Profile,
     SavedArticle,
 )
 from src.schemas.content import (
@@ -135,7 +136,15 @@ class AuthorDomain:
     ) -> list[dict[str, Any]]:
         """Публикации автора по ORCID — форма AUTHOR_ARTICLE_SELECT фронта
         (статья + название журнала через issues -> journals)."""
-        return await self._publications(db, ArticleAuthor.orcid == orcid)
+        # Себя в соавторах узнаём не только по iD: подпись из присвоенной
+        # карточки и привязка из кабинета несут profile_id, а orcid у них пуст.
+        owner = select(Profile.id).where(Profile.orcid_id == orcid)
+        return await self._publications(
+            db,
+            ArticleAuthor.orcid == orcid,
+            self_cond=(ArticleAuthor.orcid == orcid)
+            | ArticleAuthor.profile_id.in_(owner),
+        )
 
     async def list_publications_by_profile(
         self, db: AsyncSession, profile_id: str
@@ -150,10 +159,12 @@ class AuthorDomain:
             uid = uuid.UUID(str(profile_id))
         except (TypeError, ValueError):
             return []
-        return await self._publications(db, ArticleAuthor.profile_id == uid)
+        return await self._publications(
+            db, ArticleAuthor.profile_id == uid, self_cond=ArticleAuthor.profile_id == uid
+        )
 
     async def _publications(
-        self, db: AsyncSession, where: Any
+        self, db: AsyncSession, where: Any, self_cond: Any = None
     ) -> list[dict[str, Any]]:
         res = await db.execute(
             select(
@@ -167,6 +178,15 @@ class AuthorDomain:
                 Article.data,
                 Article.doi,
                 Article.publisher,
+                # Поля полной карточки: профиль рисует работы так же, как лента
+                # главной, — с аннотацией, ключевыми словами и счётчиками.
+                Article.annotation,
+                Article.keywords,
+                Article.field_of_science,
+                Article.pages,
+                Article.created_at,
+                Article.views_count,
+                Article.downloads_count,
                 Journal.name.label("journal_name"),
             )
             .join(Article, Article.id == ArticleAuthor.article_id)
@@ -175,8 +195,16 @@ class AuthorDomain:
             .where(where)
             .order_by(Article.data.desc().nullslast(), Article.id.desc())
         )
-        rows = res.all()
-        coauthors = await self._coauthors(db, [r.id for r in rows])
+        # Одна статья — одна карточка, даже если на профиль ссылаются две
+        # строки авторства (подпись из статьи и привязка из кабинета). Оставляем
+        # строку с меньшим author_order — исходную подпись; позиция в списке
+        # остаётся от первого появления статьи в сортировке по дате.
+        unique: dict[int, Any] = {}
+        for r in res.all():
+            if r.id not in unique or r.author_order < unique[r.id].author_order:
+                unique[r.id] = r
+        rows = list(unique.values())
+        coauthors = await self._coauthors(db, [r.id for r in rows], self_cond)
         return [
             {
                 "author_name": r.author_name,
@@ -191,6 +219,15 @@ class AuthorDomain:
                     "doi": r.doi,
                     "publisher": r.publisher,
                     "journal_name": r.journal_name,
+                    "annotation": r.annotation,
+                    "keywords": r.keywords,
+                    "field_of_science": r.field_of_science,
+                    "pages": r.pages,
+                    "created_at": r.created_at,
+                    # Имена как в списках статей (ArticlePublic): карточка ждёт
+                    # views/downloads, а в модели колонки с суффиксом _count.
+                    "views": r.views_count,
+                    "downloads": r.downloads_count,
                     # Все подписанты статьи со слагами их карточек. Соавтор в
                     # списке работ — это ссылка на его страницу, где он может
                     # забрать себе те же работы: иначе о существовании своей
@@ -202,31 +239,40 @@ class AuthorDomain:
         ]
 
     async def _coauthors(
-        self, db: AsyncSession, article_ids: list[int]
+        self, db: AsyncSession, article_ids: list[int], self_cond: Any = None
     ) -> dict[int, list[dict[str, Any]]]:
         """{article_id: [{name, slug}]} одним запросом на весь список.
 
         Пишется батчем намеренно: в профиле плодовитого автора полсотни работ,
         и запрос на карточку превратил бы страницу в полсотни обращений к базе.
+
+        `self_cond` (условие по колонкам article_authors) помечает подписи
+        самого владельца профиля флагом `self` — блок «Соавторы» их отсекает.
+        По имени этого не сделать: под статьёй человек записан иначе, чем в
+        профиле. Без условия флага в ответе нет (карточка автора).
         """
         if not article_ids:
             return {}
+        cols = [
+            ArticleAuthor.article_id,
+            ArticleAuthor.author_name,
+            ArticleAuthor.author_order,
+            Author.slug,
+        ]
+        if self_cond is not None:
+            cols.append(self_cond.label("is_self"))
         res = await db.execute(
-            select(
-                ArticleAuthor.article_id,
-                ArticleAuthor.author_name,
-                ArticleAuthor.author_order,
-                Author.slug,
-            )
+            select(*cols)
             .outerjoin(Author, Author.id == ArticleAuthor.author_id)
             .where(ArticleAuthor.article_id.in_(set(article_ids)))
             .order_by(ArticleAuthor.article_id, ArticleAuthor.author_order)
         )
         out: dict[int, list[dict[str, Any]]] = {}
         for row in res.all():
-            out.setdefault(row.article_id, []).append(
-                {"name": row.author_name, "slug": row.slug}
-            )
+            item: dict[str, Any] = {"name": row.author_name, "slug": row.slug}
+            if self_cond is not None:
+                item["self"] = bool(row.is_self)
+            out.setdefault(row.article_id, []).append(item)
         return out
 
 

@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import uuid
 from datetime import date
+from pathlib import Path
 
 from sqlalchemy import select
 
@@ -39,7 +41,7 @@ from src.infrastructure.persistence.models import (
     User,
 )
 
-JOURNAL_SLUG = "scientific-journal-demo"
+JOURNAL_SLUG = "scientific-journal-demo"   # общий стенд; клиентский задаётся --slug
 JOURNAL_NAME = "Scientific Journal (демонстрационный)"
 DEMO_EMAIL = "demo@researcher.uz"
 DEMO_FULL_NAME = "Демо-редактор"
@@ -150,22 +152,51 @@ async def upload_pdf(slug: str, title: str) -> str | None:
     return public_url(key)
 
 
+def article_slug(base: str, journal_slug: str) -> str:
+    """Слаги статей уникальны на всю базу, поэтому для клиентского стенда
+    префиксуем их слагом журнала. Общий стенд оставляем как был — иначе
+    повторный запуск создал бы ему дубли статей."""
+    return base if journal_slug == JOURNAL_SLUG else f"{journal_slug}-{base}"
+
+
+def load_articles(path: str | None) -> list[dict]:
+    """Свой набор статей — JSON-список с теми же ключами, что у DEMO_ARTICLES.
+    Нужен, когда стенд поднимается под профиль клиента (ветеринария, право…),
+    а не под мультидисциплинарные образцы."""
+    if not path:
+        return DEMO_ARTICLES
+    items = json.loads(Path(path).read_text(encoding="utf-8"))
+    allowed = set(DEMO_ARTICLES[0])
+    for it in items:
+        extra = set(it) - allowed
+        if extra:
+            raise SystemExit(f"неизвестные поля в статье {it.get('slug')}: {sorted(extra)}")
+    return items
+
+
 async def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--email", default=DEMO_EMAIL)
     p.add_argument("--slug", default=JOURNAL_SLUG)
     p.add_argument("--skip-pdf", action="store_true", help="не загружать PDF в R2")
+    p.add_argument("--journal-name", default=JOURNAL_NAME,
+                   help="название, если журнал ещё не заведён")
+    p.add_argument("--articles", help="JSON-файл со своим набором статей")
     args = p.parse_args()
 
     password = os.environ.get("DEMO_PASSWORD")
     if not password and not args.dry_run:
         raise SystemExit("Задай пароль демо-учётки в переменной DEMO_PASSWORD.")
 
+    articles = load_articles(args.articles)
+
     if args.dry_run:
-        print(f"Журнал: {JOURNAL_NAME}  /uz/journal/{args.slug}  (metadata.demo=true)")
+        print(f"Журнал: {args.journal_name}  /uz/journal/{args.slug}  (metadata.demo=true)")
         print(f"Учётка: {args.email}  role=admin, привязка journal_admins")
-        print(f"Выпуск: {date.today().year}, том 1, № 1 + {len(DEMO_ARTICLES)} статьи")
+        print(f"Выпуск: {date.today().year}, том 1, № 1 + {len(articles)} статьи")
+        for it in articles:
+            print(f"  · {article_slug(it['slug'], args.slug)}  {it['title'][:60]}")
         return 0
 
     async with AsyncSessionLocal() as db:
@@ -175,7 +206,7 @@ async def main() -> int:
         ).scalars().first()
         if journal is None:
             journal = Journal(
-                name=JOURNAL_NAME,
+                name=args.journal_name,
                 slug=args.slug,
                 type="journal",
                 description=(
@@ -265,7 +296,8 @@ async def main() -> int:
             print(f"= выпуск уже есть, id={issue.id}")
 
         # --- статьи ----------------------------------------------------------
-        for item in DEMO_ARTICLES:
+        for item in articles:
+            item = {**item, "slug": article_slug(item["slug"], args.slug)}
             exists = (
                 await db.execute(select(Article).where(Article.slug == item["slug"]))
             ).scalars().first()

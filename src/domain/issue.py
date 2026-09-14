@@ -15,6 +15,14 @@ from src.infrastructure.persistence.models import Article, ConferenceSection, Is
 from src.schemas.issue import IssueCreate, IssueUpdate
 
 
+class IssueNotEmptyError(Exception):
+    """Удаление выпуска, в котором ещё есть статьи."""
+
+    def __init__(self, count: int):
+        super().__init__(f"Issue has {count} articles")
+        self.count = count
+
+
 class IssueDomain:
     async def list_issues(
         self,
@@ -96,16 +104,18 @@ class IssueDomain:
         issue = await self.get_issue(db, issue_id)
         if not issue:
             return False
-        # Статьи выпуска не удаляем — открепляем (FK articles.issue_id nullable),
-        # иначе удаление выпуска молча уносит опубликованный контент.
-        await db.execute(
-            Article.__table__.update()
-            .where(Article.issue_id == issue_id)
-            .values(issue_id=None, section_id=None)
+        # Непустой выпуск не удаляется. Раньше его статьи откреплялись и
+        # оставались опубликованными без выпуска: редактор удалил номер, завёл
+        # заново и перезалил те же 67 статей — на сайте, в карточках авторов и
+        # в Scholar появились дубли. Статьи сначала удаляют явно (в админке
+        # выпуска есть массовое удаление).
+        count = await db.scalar(
+            select(func.count(Article.id)).where(Article.issue_id == issue_id)
         )
+        if count:
+            raise IssueNotEmptyError(count)
         # Секции конференции живут только внутри тома (FK issue_id NOT NULL),
-        # осиротеть не могут — удаляем вместе с ним. Порядок важен: сначала
-        # отвязали статьи от секций, иначе FK articles.section_id не даст.
+        # осиротеть не могут — удаляем вместе с ним.
         await db.execute(
             delete(ConferenceSection).where(ConferenceSection.issue_id == issue_id)
         )

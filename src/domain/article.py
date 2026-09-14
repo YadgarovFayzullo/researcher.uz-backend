@@ -10,6 +10,7 @@ from slugify import slugify
 from sqlalchemy import Integer, Select, case, cast, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.domain import article_trash
 from src.domain.demo import article_is_not_demo
 from src.domain.serialization import HEAVY_ARTICLE_COLUMNS, row_to_dict
 from src.infrastructure.persistence.models import (
@@ -17,6 +18,7 @@ from src.infrastructure.persistence.models import (
     ArticleAuthor,
     ArticleInteraction,
     ArticleReference,
+    ExternalCitation,
     Issue,
     Journal,
     Publisher,
@@ -503,33 +505,61 @@ class ArticleDomain:
         return article
 
     async def delete_article(self, db: AsyncSession, id: int) -> bool:
-        article = await self.get_article_by_id(db, id)
-        if not article:
-            return False
+        return await self.delete_articles(db, [id]) > 0
+
+    async def delete_articles(
+        self,
+        db: AsyncSession,
+        ids: Sequence[int],
+        *,
+        deleted_by: uuid.UUID | str | None = None,
+    ) -> int:
+        """Удалить статьи вместе с зависимыми строками одной транзакцией.
+
+        Одиночное и массовое удаление (админка выпуска) идут через один путь:
+        список зависимых таблиц не должен расходиться между ними. Возвращает
+        число реально удалённых строк.
+
+        Перед удалением снимок уходит в корзину (article_trash, 30 дней) в той
+        же транзакции: не записался снимок — не удалилась и статья. Новую
+        зависимую таблицу добавляй и сюда, и в article_trash.DEPENDENT_TABLES.
+        """
+        ids = list(dict.fromkeys(ids))
+        if not ids:
+            return 0
+        await article_trash.trash_articles(db, ids, deleted_by=deleted_by)
         # Зависимые строки сносим явно: ON DELETE CASCADE в схеме нет, без
         # этого удаление падает на FK. Ссылки чистим с обеих сторон — статья
         # может и цитировать, и быть процитированной.
         await db.execute(
-            ArticleAuthor.__table__.delete().where(ArticleAuthor.article_id == id)
+            ArticleAuthor.__table__.delete().where(ArticleAuthor.article_id.in_(ids))
         )
         await db.execute(
             ArticleReference.__table__.delete().where(
-                ArticleReference.article_id == id
+                ArticleReference.article_id.in_(ids)
             )
         )
         await db.execute(
             ArticleReference.__table__.update()
-            .where(ArticleReference.cited_article_id == id)
+            .where(ArticleReference.cited_article_id.in_(ids))
             .values(cited_article_id=None)
         )
         await db.execute(
-            SavedArticle.__table__.delete().where(SavedArticle.article_id == id)
+            SavedArticle.__table__.delete().where(SavedArticle.article_id.in_(ids))
         )
         await db.execute(
             ArticleInteraction.__table__.delete().where(
-                ArticleInteraction.article_id == id
+                ArticleInteraction.article_id.in_(ids)
             )
         )
-        await db.delete(article)
+        # Кэш цитирований Crossref: FK без ON DELETE, поэтому у статьи, по
+        # которой хоть раз считали цитируемость, удаление падало с 500
+        # (ForeignKeyViolation на external_citations_article_id_fkey).
+        await db.execute(
+            ExternalCitation.__table__.delete().where(
+                ExternalCitation.article_id.in_(ids)
+            )
+        )
+        res = await db.execute(Article.__table__.delete().where(Article.id.in_(ids)))
         await db.commit()
-        return True
+        return res.rowcount or 0

@@ -23,7 +23,7 @@ Google Scholar это дубликаты с расходящимися мета�
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterable
 from uuid import UUID
 
 from sqlalchemy import select
@@ -37,7 +37,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _set_meta(obj: Any, key: str, value: Any) -> None:
+def set_meta(obj: Any, key: str, value: Any) -> None:
     """Записать ключ в JSONB-колонку `metadata`.
 
     JSONB приезжает обычным dict, и правка вложенного значения не помечает
@@ -92,7 +92,7 @@ async def block_issue(
         # Статьи, снятые именно этой блокировкой, — для точного отката.
         "article_ids": [a.id for a in rows],
     }
-    _set_meta(issue, "blocked", blocked)
+    set_meta(issue, "blocked", blocked)
     await db.commit()
     return blocked
 
@@ -118,7 +118,7 @@ async def unblock_issue(db: AsyncSession, issue: Issue) -> int:
                 continue
             article.published = True
             restored += 1
-    _set_meta(issue, "blocked", None)
+    set_meta(issue, "blocked", None)
     await db.commit()
     return restored
 
@@ -132,7 +132,7 @@ async def takedown_article(
 ) -> dict[str, Any]:
     """Снять статью с публикации как нарушение и погасить её выпуск."""
     article.published = False
-    _set_meta(
+    set_meta(
         article,
         "takedown",
         {"at": _now(), "by": str(by) if by else None, "reason": reason},
@@ -155,7 +155,24 @@ async def takedown_article(
     return {"article_id": article.id, "issue_blocked": blocked}
 
 
+async def article_slugs(db: AsyncSession, ids: Iterable[int]) -> list[str]:
+    """Слаги статей по id — фронту, чтобы сбросить ISR-кэш их страниц.
+
+    Санкция обязана доезжать до сайта сразу. Страница статьи кэшируется на
+    30 суток, и без явного сброса снятая за нарушение работа оставалась бы
+    открытой и проиндексированной ещё месяц — то есть ровно то, из-за чего
+    Scholar и наказывает площадку целиком.
+    """
+    wanted = [int(i) for i in ids]
+    if not wanted:
+        return []
+    rows = (
+        await db.execute(select(Article.slug).where(Article.id.in_(wanted)))
+    ).scalars().all()
+    return [slug for slug in rows if slug]
+
+
 async def restore_article(db: AsyncSession, article: Article) -> None:
     """Убрать отметку нарушения (выпуск при этом не разблокируется)."""
-    _set_meta(article, "takedown", None)
+    set_meta(article, "takedown", None)
     await db.commit()

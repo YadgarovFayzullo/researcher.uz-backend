@@ -1,0 +1,12 @@
+Assalomu alaykum, $name!
+
+«$author_name» muallif sahifasi bo'yicha arizangiz tasdiqlandi. Endi bu sahifa — sizning profilingiz, platformadagi $works ta ishingiz shu yerda jamlangan.
+
+$url
+
+Profilda ismingiz qanday yozilishini, ish joyingizni va ORCID'ni ko'rsating. ORCID ulansa, boshqa nashrlardagi ishlaringiz ham profilga qo'shiladi.
+
+Savollar bo'lsa, shu xatga javob yozing.
+
+Hurmat bilan,
+$signature

@@ -10,9 +10,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import get_current_profile, require_owner
-from src.domain import moderation
+from src.domain import ai_review, moderation
 from src.domain.authz import can_write_issue
-from src.domain.issue import IssueDomain
+from src.domain.issue import IssueDomain, IssueNotEmptyError
 from src.infrastructure.persistence.db import get_db
 from src.infrastructure.persistence.models import Profile
 from src.schemas.issue import IssueCreate, IssuePublic, IssueUpdate
@@ -100,7 +100,15 @@ async def delete_issue(
     if not existing:
         raise HTTPException(status_code=404, detail="Issue not found")
     await _guard(db, profile, existing.journal_id)
-    await domain.delete_issue(db, issue_id)
+    try:
+        await domain.delete_issue(db, issue_id)
+    except IssueNotEmptyError as err:
+        # Текст показывается редактору как есть (alert/toast в админке).
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"В выпуске статей: {err.count}. Сначала удалите их — в списке "
+            "статей выпуска можно выбрать все сразу.",
+        ) from err
     return {"status": "deleted"}
 
 
@@ -126,7 +134,13 @@ async def block_issue(
     blocked = await moderation.block_issue(
         db, issue, reason=body.reason, by=profile.id
     )
-    return {"status": "blocked", "issue_id": issue_id, "blocked": blocked}
+    slugs = await moderation.article_slugs(db, blocked.get("article_ids") or [])
+    return {
+        "status": "blocked",
+        "issue_id": issue_id,
+        "blocked": blocked,
+        "revalidate_slugs": slugs,
+    }
 
 
 @router.post("/{issue_id}/unblock")
@@ -143,5 +157,71 @@ async def unblock_issue(
     issue = await domain.get_issue(db, issue_id)
     if not issue:
         raise HTTPException(status_code=404, detail="Issue not found")
+    # Список читаем ДО разблокировки: она стирает `metadata.blocked`, а вместе
+    # с ним и id статей, которым нужно сбросить ISR-кэш их страниц.
+    blocked_ids = [
+        int(i) for i in ((issue.meta or {}).get("blocked") or {}).get("article_ids") or []
+    ]
+    slugs = await moderation.article_slugs(db, blocked_ids)
     restored = await moderation.unblock_issue(db, issue)
-    return {"status": "unblocked", "issue_id": issue_id, "restored": restored}
+    return {
+        "status": "unblocked",
+        "issue_id": issue_id,
+        "restored": restored,
+        "revalidate_slugs": slugs,
+    }
+
+
+class DecisionRequest(BaseModel):
+    decision: str = Field(pattern="^(publish|keep_blocked)$")
+
+
+@router.post("/{issue_id}/ai-review")
+async def run_ai_review(
+    issue_id: int,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(require_owner),
+):
+    """Проверить очередь выпуска немедленно, не дожидаясь часовой паузы.
+
+    Owner-only, как и остальная модерация: проверка стоит денег за токены, и
+    редактор журнала не должен уметь запускать её кнопкой сколько угодно раз.
+    """
+    result = await ai_review.review_issue(db, issue_id)
+    return result
+
+
+@router.post("/{issue_id}/audit")
+async def audit_issue(
+    issue_id: int,
+    max_articles: int = Query(60, ge=1, le=300),
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(require_owner),
+):
+    """Проверить выпуск и вернуть отчёт, ничего не меняя.
+
+    В отличие от `/ai-review` работает с любым выпуском, включая давно
+    опубликованный (там очереди нет), и не применяет санкций — этим её и
+    пользуется панель владельца.
+    """
+    return await ai_review.audit_issue(db, issue_id, max_articles=max_articles)
+
+
+@router.post("/{issue_id}/ai-review/decision")
+async def decide_ai_review(
+    issue_id: int,
+    body: DecisionRequest,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(require_owner),
+):
+    """То же решение, что и кнопками в Telegram, но из админки.
+
+    run_id не передаём: в админке владелец смотрит на актуальное состояние
+    выпуска, а не на сообщение месячной давности.
+    """
+    result = await ai_review.apply_decision(
+        db, issue_id, decision=body.decision, by=str(profile.id)
+    )
+    if result["status"] == "error":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, result["reason"])
+    return result

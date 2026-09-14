@@ -218,3 +218,16 @@ def slug_for(key: str, display: str) -> str:
     base = re.sub(r"[^a-z0-9-]+", "-", base.lower()).strip("-")
     base = re.sub(r"-{2,}", "-", base)
     return base or "author"
+
+
+def unshout(name: str) -> str:
+    """«AMANULLAYEV ABDUNABI ABDUMO'MINOVICH» → «Amanullayev Abdunabi Abdumo'minovich».
+
+    Трогает только имя, набранное целиком капсом: смешанное написание автор
+    выбрал сам. Каждая часть между пробелом, точкой и дефисом — с заглавной, а
+    не `str.title()`: тот поднимает букву после апострофа («Abdumo'Minovich»,
+    «O'G'Li»), а в узбекской латинице апостроф — часть буквы.
+    """
+    if not name or not name.isupper():
+        return name
+    return re.sub(r"[^\s.\-]+", lambda m: m.group()[:1] + m.group()[1:].lower(), name)

@@ -170,6 +170,11 @@ async def main() -> int:
 
             pubs = await http.get(f"/researcher/u/{google_id}/publications")
             check("публикации отдаются", len(pubs.json()), 2)
+            # Блок «Соавторы» в профиле отсекает владельца по флагу self.
+            other_pub = next(p for p in pubs.json() if p["article"]["id"] == other.id)
+            flags = {c["name"]: c.get("self") for c in other_pub["article"]["coauthors"]}
+            check("своя подпись помечена self", flags.get(f"{TAG} Google"), True)
+            check("чужая подпись — не self", flags.get(f"{TAG} Stranger"), False)
 
             r = await http.get(f"/researcher/u/{orcid_id}")
             check("профиль с ORCID по тому же адресу", r.status_code, 200)
