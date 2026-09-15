@@ -136,15 +136,14 @@ class AuthorDomain:
     ) -> list[dict[str, Any]]:
         """Публикации автора по ORCID — форма AUTHOR_ARTICLE_SELECT фронта
         (статья + название журнала через issues -> journals)."""
-        # Себя в соавторах узнаём не только по iD: подпись из присвоенной
-        # карточки и привязка из кабинета несут profile_id, а orcid у них пуст.
+        # Не только по iD: подпись из присвоенной карточки и привязка из
+        # кабинета несут profile_id, а orcid у них пуст. Отбор публикаций идёт
+        # по тому же условию, что и распознавание себя в соавторах, — иначе
+        # страница по ORCID показывала бы меньше работ, чем та же страница по
+        # id аккаунта, и меньше, чем карточка автора.
         owner = select(Profile.id).where(Profile.orcid_id == orcid)
-        return await self._publications(
-            db,
-            ArticleAuthor.orcid == orcid,
-            self_cond=(ArticleAuthor.orcid == orcid)
-            | ArticleAuthor.profile_id.in_(owner),
-        )
+        mine = (ArticleAuthor.orcid == orcid) | ArticleAuthor.profile_id.in_(owner)
+        return await self._publications(db, mine, self_cond=mine)
 
     async def list_publications_by_profile(
         self, db: AsyncSession, profile_id: str

@@ -495,6 +495,10 @@ class ArticleAuthor(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
     orcid = Column(Text, nullable=True)
     author_id = Column(UUID(as_uuid=True), ForeignKey("authors.id"), nullable=True)
+    # Строку дописал кабинет («Это я»), а не подпись под статьёй. Такие строки
+    # не порождают карточек автора (иначе у человека их становится две) и
+    # удаляются при отвязке, тогда как настоящая подпись только отвязывается.
+    from_claim = Column(Boolean, server_default=text("false"), nullable=False)
 
     article = relationship("Article", back_populates="authors_rel")
 

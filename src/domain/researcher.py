@@ -16,7 +16,13 @@ import re
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.domain.author_names import DIGRAPHS, STANDALONE_SUFFIX, clean, translit
+from src.domain.author_names import (
+    DIGRAPHS,
+    STANDALONE_SUFFIX,
+    clean,
+    may_be_same_person,
+    translit,
+)
 from src.infrastructure.persistence.models import (
     Article,
     ArticleAuthor,
@@ -361,30 +367,97 @@ class ResearcherDomain:
         if already is not None:
             return
 
-        order = await self._next_author_order(db, article_id)
-        db.add(
-            ArticleAuthor(
-                article_id=article_id,
-                author_order=order,
-                author_name=v_name,
-                orcid=v_orcid,
-                profile_id=user_id,
-                is_verified=True,
+        signature = await self._own_signature(db, article_id, v_name)
+        if signature is not None:
+            # Человек уже подписан под статьёй — привязываем СУЩЕСТВУЮЩУЮ
+            # подпись, а не дописываем вторую. Иначе у статьи появляется лишний
+            # автор (а `articles.authors` говорит обратное), человек попадает
+            # к себе же в соавторы, и из его второго написания вырастает
+            # вторая карточка автора.
+            signature.profile_id = user_id
+            signature.orcid = signature.orcid or v_orcid
+            signature.is_verified = True
+        else:
+            # Подписи нет: в метаданных статьи человека забыли. Заводим свою
+            # строку и помечаем её — это не подпись из статьи.
+            order = await self._next_author_order(db, article_id)
+            db.add(
+                ArticleAuthor(
+                    article_id=article_id,
+                    author_order=order,
+                    author_name=v_name,
+                    orcid=v_orcid,
+                    profile_id=user_id,
+                    is_verified=True,
+                    from_claim=True,
+                )
             )
-        )
         await db.commit()
+
+    async def _own_signature(
+        self, db: AsyncSession, article_id: int, name: str
+    ) -> ArticleAuthor | None:
+        """Ничья подпись под статьёй, похожая на имя заявителя.
+
+        Отдаёт строку, только если подходящая РОВНО ОДНА: у статьи двух
+        Ядгаровых подпись не угадать, и тогда честнее завести отдельную —
+        владелец разберёт это заявкой на карточку.
+        """
+        rows = list(
+            (
+                await db.execute(
+                    select(ArticleAuthor).where(
+                        ArticleAuthor.article_id == article_id,
+                        ArticleAuthor.profile_id.is_(None),
+                        ArticleAuthor.orcid.is_(None),
+                        ArticleAuthor.from_claim.is_(False),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        found = [r for r in rows if may_be_same_person(name, r.author_name or "")]
+        return found[0] if len(found) == 1 else None
 
     async def unclaim_article(
         self, db: AsyncSession, *, user_id, article_id: int
     ) -> None:
-        """Порт unclaim_article: удалить только свои claim-строки."""
+        """Отцепить статью от профиля.
+
+        Строку, заведённую кабинетом, удаляем; настоящую подпись из статьи
+        только отвязываем — удалить её значило бы стереть автора из метаданных
+        чужой статьи одним нажатием.
+        """
         # auth.uid() null check обеспечивает get_current_profile.
+        v_orcid, _ = await self._author_identity(db, user_id)
         await db.execute(
             ArticleAuthor.__table__.delete().where(
                 ArticleAuthor.article_id == article_id,
                 ArticleAuthor.profile_id == user_id,
+                ArticleAuthor.from_claim.is_(True),
             )
         )
+        # Свой iD с подписи снимаем тоже: профиль по ORCID собирается по нему,
+        # и статья иначе осталась бы в списке. Чужой iD в строке не трогаем.
+        values: dict[str, Any] = {"profile_id": None, "is_verified": False}
+        await db.execute(
+            ArticleAuthor.__table__.update()
+            .where(
+                ArticleAuthor.article_id == article_id,
+                ArticleAuthor.profile_id == user_id,
+            )
+            .values(**values)
+        )
+        if v_orcid:
+            await db.execute(
+                ArticleAuthor.__table__.update()
+                .where(
+                    ArticleAuthor.article_id == article_id,
+                    ArticleAuthor.orcid == v_orcid,
+                )
+                .values(orcid=None)
+            )
         await db.commit()
 
     async def claim_articles_by_dois(
@@ -420,17 +493,26 @@ class ResearcherDomain:
             ).scalars().first()
             if already is not None:
                 continue
-            order = await self._next_author_order(db, aid)
-            db.add(
-                ArticleAuthor(
-                    article_id=aid,
-                    author_order=order,
-                    author_name=v_name,
-                    orcid=v_orcid,
-                    profile_id=user_id,
-                    is_verified=True,
+            # Как в claim_article: своя подпись под статьёй привязывается, а не
+            # дублируется второй строкой.
+            signature = await self._own_signature(db, aid, v_name)
+            if signature is not None:
+                signature.profile_id = user_id
+                signature.orcid = signature.orcid or v_orcid
+                signature.is_verified = True
+            else:
+                order = await self._next_author_order(db, aid)
+                db.add(
+                    ArticleAuthor(
+                        article_id=aid,
+                        author_order=order,
+                        author_name=v_name,
+                        orcid=v_orcid,
+                        profile_id=user_id,
+                        is_verified=True,
+                        from_claim=True,
+                    )
                 )
-            )
             count += 1
 
         await db.commit()

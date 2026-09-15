@@ -194,6 +194,60 @@ def identity_key(name: str) -> str:
     return f"{surname}|{'.'.join(all_initials)}"
 
 
+def _interpretations(name: str) -> set[tuple[str, frozenset[str]]]:
+    """Все допустимые чтения подписи: (фамилия, набор инициалов).
+
+    Порядок слов в подписи не задан («Makhmudov Kudratbek» и «Kudratbek
+    Makhmudov» — один человек), поэтому фамилией по очереди считается каждое
+    слово, а буквы остальных идут в инициалы. Написание без инициалов вообще
+    («Jalolov») чтений не даёт: за ним стоят разные люди.
+    """
+    raw = _tokens(name)
+    if not raw:
+        return set()
+    uzbek_order = raw[-1] in STANDALONE_SUFFIX or bool(PATRONYMIC.search(raw[-1]))
+    parts = [translit(t) for t in raw if t not in STANDALONE_SUFFIX]
+    parts = [t for t in parts if t and t not in STANDALONE_SUFFIX]
+
+    words = [t for t in parts if not _is_initial(t)]
+    initials = [_initial_of(t) for t in parts if _is_initial(t)]
+    if not words:
+        return set()
+    # Отчество в конце выдаёт порядок «Фамилия Имя Отчество» — гадать не нужно.
+    candidates = [0] if (uzbek_order or len(words) == 1) else range(len(words))
+
+    out: set[tuple[str, frozenset[str]]] = set()
+    for i in candidates:
+        letters = frozenset(
+            initials + [_initial_of(w) for j, w in enumerate(words) if j != i]
+        )
+        if letters:
+            out.add((words[i], letters))
+    return out
+
+
+def may_be_same_person(a: str, b: str) -> bool:
+    """Могут ли два написания быть одним человеком.
+
+    СОЗНАТЕЛЬНО мягче `identity_key`: совпадает фамилия, а набор инициалов
+    одного — подмножество другого («Fayzullo Yadgarov» и «F.N. Yadgarov»).
+    Ключ личности так склеивать нельзя — он общий на всю платформу, и под
+    «Yadgarov F.» окажется десяток разных людей.
+
+    Поэтому применять эту проверку можно ТОЛЬКО в пределах одной статьи и
+    только когда подходящая подпись ровно одна: там список авторов короткий,
+    человек сам заявил своё авторство, а однофамилец с другим инициалом
+    («Yadgarov N.») отсекается требованием подмножества.
+    """
+    mine = _interpretations(a)
+    theirs = _interpretations(b)
+    return any(
+        surname == other_surname and (letters <= other or other <= letters)
+        for surname, letters in mine
+        for other_surname, other in theirs
+    )
+
+
 def display_name(variants: list[str]) -> str:
     """Как показывать карточку: самое длинное написание из встреченных.
 

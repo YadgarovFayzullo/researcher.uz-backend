@@ -92,6 +92,10 @@ async def build_cards(db) -> tuple[int, int, int]:
                 ArticleAuthor.orcid,
                 ArticleAuthor.profile_id,
             )
+            # Строки, дописанные кабинетом («Это я»), — не подписи из статьи.
+            # Карточку по ним заводить нельзя: имя там из профиля, и у человека
+            # появлялась вторая карточка рядом с той, где лежат его работы.
+            .where(ArticleAuthor.from_claim.is_(False))
         )
     ).all()
 
