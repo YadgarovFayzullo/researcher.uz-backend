@@ -94,10 +94,14 @@ async def main() -> int:
         ])
         db.add(ResearcherWork(orcid=orcid, put_code=f"{TAG}-1", title=f"{TAG} work"))
 
-        journal = Journal(name=f"{TAG} journal {suffix}", slug=f"noorcid-{suffix}")
+        journal = Journal(
+            name=f"{TAG} journal {suffix}", slug=f"noorcid-{suffix}", issn="1234-5678"
+        )
         db.add(journal)
         await db.flush()
-        issue = Issue(journal_id=journal.id, title=f"{TAG} issue", year=2026)
+        issue = Issue(
+            journal_id=journal.id, title=f"{TAG} issue", year=2026, volume="3", issue="2"
+        )
         db.add(issue)
         await db.flush()
         article = Article(
@@ -170,6 +174,13 @@ async def main() -> int:
 
             pubs = await http.get(f"/researcher/u/{google_id}/publications")
             check("публикации отдаются", len(pubs.json()), 2)
+            # Выходные данные для «Списка научных трудов» в профиле.
+            art = pubs.json()[0]["article"]
+            check(
+                "том, номер и ISSN в публикации",
+                (art.get("volume"), art.get("issue_number"), art.get("issn")),
+                ("3", "2", "1234-5678"),
+            )
             # Блок «Соавторы» в профиле отсекает владельца по флагу self.
             other_pub = next(p for p in pubs.json() if p["article"]["id"] == other.id)
             flags = {c["name"]: c.get("self") for c in other_pub["article"]["coauthors"]}

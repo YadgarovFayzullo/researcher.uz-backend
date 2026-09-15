@@ -187,6 +187,12 @@ class AuthorDomain:
                 Article.views_count,
                 Article.downloads_count,
                 Journal.name.label("journal_name"),
+                # Выходные данные для «Списка научных трудов» в профиле: без
+                # тома и номера строка «Журнал, 2025, т. 3, № 2, с. 45–52» не
+                # собирается, а ISSN нужен отчётам, где журналы сверяют по нему.
+                Issue.volume.label("issue_volume"),
+                Issue.issue.label("issue_number"),
+                Journal.issn.label("journal_issn"),
             )
             .join(Article, Article.id == ArticleAuthor.article_id)
             .outerjoin(Issue, Issue.id == Article.issue_id)
@@ -227,6 +233,9 @@ class AuthorDomain:
                     # views/downloads, а в модели колонки с суффиксом _count.
                     "views": r.views_count,
                     "downloads": r.downloads_count,
+                    "volume": r.issue_volume,
+                    "issue_number": r.issue_number,
+                    "issn": r.journal_issn,
                     # Все подписанты статьи со слагами их карточек. Соавтор в
                     # списке работ — это ссылка на его страницу, где он может
                     # забрать себе те же работы: иначе о существовании своей
