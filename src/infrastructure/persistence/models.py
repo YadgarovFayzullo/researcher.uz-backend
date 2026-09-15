@@ -135,6 +135,8 @@ class Profile(Base):
     workplace = Column(Text, nullable=True)
     country = Column(Text, nullable=True)
     education = Column(Text, nullable=True)
+    # Служебные пометки: {"demo": true, "demo_login": {...}} — см. src/domain/demo.py.
+    meta = Column("metadata", JSONB, nullable=False, server_default=text("'{}'::jsonb"))
 
     user = relationship("User", back_populates="profile")
 

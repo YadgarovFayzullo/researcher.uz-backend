@@ -34,6 +34,7 @@ from src.domain.similarity import (
     tokenize_with_spans,
     total_shingles,
 )
+from src.domain.demo import demo_issue_ids
 from src.infrastructure.persistence.models import (
     Article,
     ArticleFingerprint,
@@ -276,7 +277,14 @@ class PlagiarismDomain:
                 ArticleFingerprint.hash,
                 ArticleFingerprint.position,
             )
-            .where(ArticleFingerprint.hash.in_(hashes))
+            .where(
+                ArticleFingerprint.hash.in_(hashes),
+                # Демо-статьи — не источники заимствований: копии для показа
+                # (демо-профиль) дословно повторяют настоящие статьи.
+                ArticleFingerprint.article_id.notin_(
+                    select(Article.id).where(Article.issue_id.in_(demo_issue_ids()))
+                ),
+            )
         )
         # Саму себя статья не «заимствует»: при перепроверке уже
         # проиндексированной статьи её собственные отпечатки надо исключить.

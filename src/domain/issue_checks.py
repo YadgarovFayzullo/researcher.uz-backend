@@ -34,6 +34,7 @@ from typing import Iterable
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.domain.demo import article_is_not_demo
 from src.infrastructure.persistence.models import Article, Issue, Journal
 
 MAJOR = "major"
@@ -476,6 +477,10 @@ async def check_platform_duplicates(
             await db.execute(
                 select(Article.id, Article.doi, Article.title, Article.issue_id).where(
                     Article.id.notin_(ids),
+                    # Демо-статьи (показ клиентам, копии для демо-профиля) — не
+                    # «уже опубликованное»: копия с тем же заголовком иначе
+                    # погасила бы выпуск настоящего журнала за дубль.
+                    article_is_not_demo(),
                     func.lower(Article.doi).in_(dois),
                 )
             )
@@ -514,6 +519,7 @@ async def check_platform_duplicates(
             await db.execute(
                 select(Article.id, Article.title, Article.issue_id).where(
                     Article.id.notin_(ids),
+                    article_is_not_demo(),
                     or_(*[Article.title.ilike(p, escape="\\") for p in patterns]),
                 )
             )
@@ -538,7 +544,7 @@ async def check_platform_duplicates(
         clashes = (
             await db.execute(
                 select(Article.id, Article.pdf, Article.title).where(
-                    Article.id.notin_(ids), Article.pdf.in_(pdfs)
+                    Article.id.notin_(ids), article_is_not_demo(), Article.pdf.in_(pdfs)
                 )
             )
         ).all()

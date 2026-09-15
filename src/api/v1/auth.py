@@ -7,6 +7,7 @@ Supabase юзеров, как только их bcrypt-хэши добраны (
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import get_current_user
@@ -14,7 +15,9 @@ from src.core.cookies import clear_auth_cookies, set_auth_cookies
 from src.core.ratelimit import limiter
 from src.core.security import create_access_token, create_refresh_token, decode_token
 from src.core.turnstile import client_ip, verify_token
+from src.core.config import settings
 from src.domain.auth import AuthDomain
+from src.domain.demo import demo_user_for_login
 from src.infrastructure.persistence.db import get_db
 from src.infrastructure.persistence.models import User
 from src.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserMe
@@ -63,6 +66,40 @@ async def login(
     if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
     return _issue(response, user)
+
+
+_DEMO_LOCALES = {"ru", "uz", "en", "ko", "tr"}
+
+
+@router.get("/demo-login")
+@limiter.limit("20/minute")
+async def demo_login(
+    request: Request,
+    t: str = "",
+    locale: str = "ru",
+    db: AsyncSession = Depends(get_db),
+):
+    """Автовход в демо-профиль исследователя по ссылке — показ без регистрации.
+
+    Ссылку выдаёт `scripts/create_demo_researcher.py`. Токен сверяется по SHA-256
+    со сроком и работает только для профиля с пометкой demo (src/domain/demo.py):
+    обычный аккаунт так не открыть. Неверная или просроченная ссылка ведёт на
+    страницу входа, а не отвечает ошибкой — её откроет человек, а не клиент API.
+    """
+    front = settings.FRONTEND_URL.rstrip("/")
+    loc = locale if locale in _DEMO_LOCALES else "ru"
+    user = await demo_user_for_login(db, t)
+    if user is None:
+        return RedirectResponse(
+            f"{front}/{loc}/auth/login?demo_error=invalid",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    resp = RedirectResponse(
+        f"{front}/{loc}/researcher/u/{user.id}",
+        status_code=status.HTTP_303_SEE_OTHER,
+    )
+    _issue(resp, user)
+    return resp
 
 
 @router.post("/refresh", response_model=TokenResponse)

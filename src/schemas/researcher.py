@@ -40,6 +40,8 @@ class ResearcherProfile(BaseModel):
     country: str | None = None
     bio: str | None = None
     education: str | None = None
+    # Демо-профиль для показа (src/domain/demo.py) — фронт закрывает от индекса.
+    is_demo: bool = False
 
 
 class ResearcherWorkPublic(BaseModel):

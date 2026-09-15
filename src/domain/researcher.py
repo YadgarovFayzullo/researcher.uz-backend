@@ -16,6 +16,13 @@ import re
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.domain.demo import (
+    article_is_demo,
+    is_demo_profile,
+    meta_is_demo,
+    profile_is_demo,
+    profile_is_not_demo,
+)
 from src.domain.author_names import (
     DIGRAPHS,
     STANDALONE_SUFFIX,
@@ -172,6 +179,8 @@ class ResearcherDomain:
                     Profile.is_public.is_(True),
                     Profile.avatar_url.isnot(None),
                     Profile.avatar_url != "",
+                    # Демо-профиль для показа дизайнеру/клиенту — не витрина.
+                    profile_is_not_demo(),
                 )
                 .order_by(Profile.created_at.desc().nullslast())
                 .limit(max(1, min(limit, 50)))
@@ -209,6 +218,10 @@ class ResearcherDomain:
         заявка по-прежнему возможна).
         """
         prof = await self._profile(db, user_id)
+        # Демо-профилю подсказывать чужие карточки незачем: заявка на них у него
+        # всё равно закрыта (authors.request_claim).
+        if is_demo_profile(prof):
+            return []
         words, _ = _profile_name_parts(prof.full_name)
         if len(words) < 2:
             return []
@@ -354,6 +367,11 @@ class ResearcherDomain:
         ).scalars().first()
         if exists_article is None:
             raise CabinetError("article not found")
+        # Демо-профиль подписывается только под демо-статьями: иначе кнопка
+        # «Прикрепить», ради которой его и показывают, сделала бы вымышленного
+        # человека подписантом настоящей статьи.
+        if await profile_is_demo(db, user_id) and not await article_is_demo(db, article_id):
+            raise CabinetError("demo profile can attach only demo articles")
 
         # Уже на этом профиле? (по profile_id или orcid)
         already = (
@@ -464,6 +482,8 @@ class ResearcherDomain:
         self, db: AsyncSession, *, user_id, dois: list[str]
     ) -> int:
         """Порт claim_articles_by_dois: bulk-привязка по DOI. Возвращает число новых."""
+        if await profile_is_demo(db, user_id):
+            raise CabinetError("demo profile cannot import works by DOI")
         v_orcid, v_name = await self._author_identity(db, user_id)
         wanted = {d for d in (_norm_doi(x) for x in (dois or [])) if d}
         if not wanted:
@@ -526,6 +546,8 @@ class ResearcherDomain:
         Возвращает число сохранённых работ.
         """
         prof = await self._profile(db, user_id)
+        if is_demo_profile(prof):
+            raise CabinetError("demo profile cannot import ORCID works")
         if not prof.orcid_id:
             raise CabinetError("no ORCID linked")
         v_orcid = prof.orcid_id
@@ -583,6 +605,7 @@ class ResearcherDomain:
                     Profile.country,
                     Profile.bio,
                     Profile.education,
+                    Profile.meta,
                 ).where(Profile.orcid_id == orcid)
             )
         ).first()
@@ -596,6 +619,8 @@ class ResearcherDomain:
             "country": row.country,
             "bio": row.bio,
             "education": row.education,
+            # Фронт ставит демо-профилю noindex.
+            "is_demo": meta_is_demo(row.meta),
         }
 
     async def get_profile_by_user_id(
@@ -627,6 +652,7 @@ class ResearcherDomain:
                     Profile.country,
                     Profile.bio,
                     Profile.education,
+                    Profile.meta,
                 ).where(Profile.id == uid, Profile.is_public.isnot(False))
             )
         ).first()
@@ -640,6 +666,8 @@ class ResearcherDomain:
             "country": row.country,
             "bio": row.bio,
             "education": row.education,
+            # Фронт ставит демо-профилю noindex.
+            "is_demo": meta_is_demo(row.meta),
         }
 
     async def list_researcher_works(

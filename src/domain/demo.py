@@ -26,9 +26,14 @@
 """
 from __future__ import annotations
 
-from sqlalchemy import ColumnElement, Select, func, or_, select
+import hashlib
+from datetime import datetime, timezone
+from typing import Any
 
-from src.infrastructure.persistence.models import Article, Issue, Journal
+from sqlalchemy import ColumnElement, Select, func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.infrastructure.persistence.models import Article, Issue, Journal, Profile, User
 
 # Ключ в journals.metadata. Значение — JSON true (проверяем текстом, чтобы
 # строковое "true" из ручной правки тоже считалось демо).
@@ -61,3 +66,90 @@ def article_is_not_demo() -> ColumnElement[bool]:
         Article.issue_id.is_(None),
         Article.issue_id.notin_(demo_issue_ids()),
     )
+
+
+async def article_is_demo(db: AsyncSession, article_id: int) -> bool:
+    """Статья лежит в выпуске демо-журнала."""
+    row = (
+        await db.execute(
+            select(Article.id).where(
+                Article.id == article_id, Article.issue_id.in_(demo_issue_ids())
+            )
+        )
+    ).first()
+    return row is not None
+
+
+# --------------------------------------------------------------------------- #
+# Демо-профиль исследователя
+#
+# Заводится `scripts/create_demo_researcher.py`, чтобы показать кабинет
+# исследователя (все кнопки владельца) дизайнеру или клиенту прямо на проде, без
+# регистрации. Пометка в `profiles.metadata`:
+#   {"demo": true, "demo_login": {"sha256": "...", "expires_at": "ISO"}}
+# Что она делает:
+# * карусель профилей на главной его не показывает (`public_profiles`);
+# * страница профиля отдаётся с `is_demo`, фронт ставит ей noindex;
+# * «Прикрепить публикацию» принимает только статьи демо-журналов, а импорт по
+#   DOI и ORCID, привязка ORCID и заявка «Это я» закрыты — иначе кнопки,
+#   которые для того и показывают, поменяли бы настоящие данные;
+# * вход — по ссылке `GET /auth/demo-login?t=<токен>`; в базе только SHA-256
+#   токена и срок, сам токен печатается скриптом один раз.
+# --------------------------------------------------------------------------- #
+
+DEMO_LOGIN = "demo_login"
+
+
+def meta_is_demo(meta: dict[str, Any] | None) -> bool:
+    return str((meta or {}).get(DEMO_FLAG)).lower() == "true"
+
+
+def is_demo_profile(profile: Profile | None) -> bool:
+    return profile is not None and meta_is_demo(profile.meta)
+
+
+def profile_is_not_demo() -> ColumnElement[bool]:
+    """Условие на Profile: профиль не демонстрационный."""
+    return func.coalesce(Profile.meta[DEMO_FLAG].astext, "false") != "true"
+
+
+async def profile_is_demo(db: AsyncSession, profile_id) -> bool:
+    meta = (
+        await db.execute(select(Profile.meta).where(Profile.id == profile_id))
+    ).scalar_one_or_none()
+    return meta_is_demo(meta)
+
+
+def demo_login_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+async def demo_user_for_login(db: AsyncSession, token: str) -> User | None:
+    """Пользователь демо-профиля по токену ссылки автовхода или None.
+
+    None — и для неизвестного токена, и для просроченного, и для профиля, с
+    которого сняли пометку demo: ссылка не должна пережить ни одно из этого.
+    """
+    if not token or len(token) < 32:
+        return None
+    profile = (
+        await db.execute(
+            select(Profile).where(
+                Profile.meta[DEMO_LOGIN]["sha256"].astext == demo_login_hash(token)
+            )
+        )
+    ).scalars().first()
+    if not is_demo_profile(profile):
+        return None
+    raw = ((profile.meta or {}).get(DEMO_LOGIN) or {}).get("expires_at")
+    try:
+        expires = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if expires <= datetime.now(timezone.utc):
+        return None
+    return (
+        await db.execute(select(User).where(User.id == profile.id))
+    ).scalars().first()

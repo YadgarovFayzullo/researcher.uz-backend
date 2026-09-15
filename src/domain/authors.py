@@ -18,7 +18,7 @@ from sqlalchemy import Integer, Text, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.content import AuthorDomain
-from src.domain.demo import article_is_not_demo
+from src.domain.demo import article_is_not_demo, profile_is_demo
 from src.infrastructure.persistence.models import (
     Article,
     ArticleAuthor,
@@ -258,6 +258,11 @@ class AuthorCardDomain:
         if author is None:
             raise AuthorCardError("Author card not found")
         uid = uuid.UUID(str(profile_id))
+        # Демо-профиль не подаёт заявок: иначе показ кнопки «Это я» дизайнеру
+        # оставлял бы в очереди владельца заявки вымышленного человека на
+        # настоящие карточки.
+        if await profile_is_demo(db, uid):
+            raise AuthorCardError("Demo profile cannot claim author cards")
 
         if author.profile_id is not None:
             if author.profile_id == uid:

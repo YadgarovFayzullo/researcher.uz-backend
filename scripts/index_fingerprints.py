@@ -20,6 +20,7 @@ import time
 
 from sqlalchemy import select
 
+from src.domain.demo import article_is_not_demo
 from src.domain.plagiarism import PlagiarismDomain
 from src.infrastructure.pdf_text import pdf_to_checkable_text
 from src.infrastructure.persistence.db import AsyncSessionLocal
@@ -59,7 +60,10 @@ async def main() -> int:
     started = time.time()
 
     async with AsyncSessionLocal() as db:
-        stmt = select(Article.id, Article.pdf, Article.title).where(Article.pdf.isnot(None))
+        # Демо-статьи не индексируем: это показ, а не источник заимствований.
+        stmt = select(Article.id, Article.pdf, Article.title).where(
+            Article.pdf.isnot(None), article_is_not_demo()
+        )
         if args.article:
             stmt = stmt.where(Article.id == args.article)
         elif args.repair:

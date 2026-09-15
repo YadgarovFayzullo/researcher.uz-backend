@@ -9,11 +9,22 @@ from __future__ import annotations
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.domain.demo import is_demo_profile
 from src.infrastructure.persistence.models import ArticleAuthor, Profile
 
 
 class OrcidTaken(Exception):
     """ORCID уже привязан к другому аккаунту."""
+
+
+class DemoProfileOrcid(OrcidTaken):
+    """Демо-профилю ORCID не привязывается.
+
+    Подкласс OrcidTaken намеренно: callback уже умеет отвечать на него
+    редиректом с ошибкой, а ни одна привязка при этом не происходит. Без запрета
+    дизайнер, нажав «Привязать ORCID», прицепил бы к демо свой настоящий iD и
+    вместе с ним — все статьи с этим iD.
+    """
 
 
 class OrcidDomain:
@@ -42,6 +53,8 @@ class OrcidDomain:
         if profile is None:
             profile = Profile(id=user_id, role="authenticated")
             db.add(profile)
+        elif is_demo_profile(profile):
+            raise DemoProfileOrcid()
 
         profile.orcid_id = orcid
         # непустые поля перезаписываем (как link_my_orcid)
