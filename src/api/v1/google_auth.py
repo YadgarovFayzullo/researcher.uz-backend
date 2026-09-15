@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
 from src.core.cookies import set_auth_cookies
+from src.core.redirects import safe_next
 from src.core.security import create_access_token, create_refresh_token
 from src.domain.auth import AuthDomain
 from src.infrastructure.persistence.db import get_db
@@ -42,8 +43,9 @@ def _require_config() -> None:
 async def google_login(request: Request):
     _require_config()
     state = secrets.token_urlsafe(24)
-    # необязательный ?next= — куда вернуть на фронте после логина
-    next_url = request.query_params.get("next") or settings.FRONTEND_URL
+    # необязательный ?next= — куда вернуть на фронте после логина. Только
+    # внутренний путь: с чужим адресом ручка стала бы открытым редиректом.
+    next_url = safe_next(request.query_params.get("next"))
     params = {
         "client_id": settings.GOOGLE_CLIENT_ID,
         "redirect_uri": settings.GOOGLE_REDIRECT_URI,

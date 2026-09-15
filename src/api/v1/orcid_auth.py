@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.deps import get_optional_user
 from src.core.config import settings
 from src.core.cookies import set_auth_cookies
+from src.core.redirects import safe_next
 from src.core.security import create_access_token, create_refresh_token
 from src.domain.auth import AuthDomain
 from src.domain.orcid import OrcidDomain, OrcidTaken
@@ -35,6 +36,9 @@ from src.infrastructure.persistence.models import User
 router = APIRouter()
 domain = OrcidDomain()
 auth_domain = AuthDomain()
+
+# Куда вернуть после входа; ставится на /login, читается в /callback.
+_NEXT_COOKIE = "orcid_oauth_next"
 
 
 def _base() -> str:
@@ -71,7 +75,19 @@ async def orcid_login(request: Request):
         "scope": "/authenticate",
         "redirect_uri": f"{settings.ORCID_REDIRECT_URI}?locale={locale}",
     }
-    return RedirectResponse(_base() + "/oauth/authorize?" + urllib.parse.urlencode(params))
+    resp = RedirectResponse(
+        _base() + "/oauth/authorize?" + urllib.parse.urlencode(params)
+    )
+    # Куда вернуть после входа — в cookie, а не в redirect_uri: тот
+    # зарегистрирован у ORCID, и лишний параметр в нём ломает сверку адреса.
+    raw_next = request.query_params.get("next")
+    if raw_next:
+        resp.set_cookie(
+            _NEXT_COOKIE, safe_next(raw_next), max_age=600, httponly=True,
+            secure=settings.COOKIE_SECURE, samesite=settings.COOKIE_SAMESITE,
+            path="/",
+        )
+    return resp
 
 
 def _extract_profile(data: dict) -> dict:
@@ -183,9 +199,14 @@ async def orcid_callback(
         # чужому профилю руками — просим войти под ним.
         return _login_err("orcid_taken")
 
+    # Пришёл с карточки автора («Это я») — возвращаем туда, иначе на профиль.
+    back = request.cookies.get(_NEXT_COOKIE)
     resp = RedirectResponse(
-        f"{front}/{locale}/researcher/{orcid}", status_code=status.HTTP_302_FOUND
+        back or f"{front}/{locale}/researcher/{orcid}",
+        status_code=status.HTTP_302_FOUND,
     )
+    if back:
+        resp.delete_cookie(_NEXT_COOKIE, path="/")
     if issue_session:
         set_auth_cookies(
             resp,
