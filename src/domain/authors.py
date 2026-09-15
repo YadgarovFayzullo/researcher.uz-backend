@@ -314,6 +314,10 @@ class AuthorCardDomain:
                     AuthorClaim.status,
                     AuthorClaim.note,
                     AuthorClaim.created_at,
+                    # Решённые заявки админка показывает со статусом, датой и
+                    # причиной — без них не проверить, кому и почему отказали.
+                    AuthorClaim.decided_at,
+                    AuthorClaim.decision_reason,
                     Author.slug,
                     Author.display_name,
                     Author.works_count,
@@ -335,6 +339,8 @@ class AuthorCardDomain:
                 "status": r.status,
                 "note": r.note,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
+                "decided_at": r.decided_at.isoformat() if r.decided_at else None,
+                "decision_reason": r.decision_reason,
                 "author": {
                     "slug": r.slug,
                     "display_name": r.display_name,
