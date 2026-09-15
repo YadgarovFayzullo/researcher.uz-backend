@@ -63,6 +63,9 @@ async def _stream_object(
         "Cache-Control": _CACHE,
         "ETag": etag,
         "Accept-Ranges": "bytes",
+        # Без него CDN Vercel отвечает на Range срезом закэшированного 200 со
+        # статусом 200, и pdf.js принимает срез за весь файл («Invalid Root reference»).
+        "Vary": "Range",
     }
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=304, headers=headers)
