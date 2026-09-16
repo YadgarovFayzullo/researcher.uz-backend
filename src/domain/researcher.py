@@ -64,16 +64,74 @@ def _within(a: list[str], b: list[str]) -> bool:
 
 
 def _fold(word: str) -> str:
-    """Имя для сравнения написаний: «Farhod» = «Фарход» (farxod), «Yorqinoy» = «Yorkinoy»."""
-    w = re.sub(r"['\-]", "", word.lower())
+    """Имя для сравнения написаний: «Farhod» = «Фарход» (farxod), «Yorqinoy» = «Yorkinoy».
+
+    «O'» — узбекская «ў», в русской записи это «у»: «O'tkirjon» = «Utkirjon».
+    """
+    w = word.lower().replace("o'", "u")
+    w = re.sub(r"['\-]", "", w)
     return w.replace("kh", "x").replace("h", "x").replace("q", "k")
+
+
+_VOWELS = frozenset("aeiou")
+
+
+def _same_word(a: str, b: str) -> bool:
+    """Одно слово ФИО в разных записях.
+
+    Кроме `_fold` терпим замену гласных: узбекские a/o и u/o в русской и
+    латинской записи расходятся («Ishkazakova» из профиля против «Ishkozokova»
+    под статьёй). Только замену и только гласной на гласную: длина разная —
+    это уже «Rajabov»/«Rajabova», другая согласная — «Asatova»/«Asadova».
+    Одна замена на короткое слово, две — на длинное; пока это лишь подсказка,
+    решение по заявке всё равно за владельцем.
+    """
+    fa, fb = _fold(a), _fold(b)
+    if fa == fb:
+        return True
+    if len(fa) != len(fb) or len(fa) < 5:
+        return False
+    diffs = [(x, y) for x, y in zip(fa, fb) if x != y]
+    return len(diffs) <= (2 if len(fa) >= 9 else 1) and all(
+        x in _VOWELS and y in _VOWELS for x, y in diffs
+    )
+
+
+def _same_initial(a: str, b: str) -> bool:
+    # Инициал «ў» в ключе карточки — «o» (апостроф в ключ не попадает), а в
+    # профиле тот же человек пишется через «U».
+    return a == b or {a, b} == {"o", "u"}
+
+
+def _key_pattern(word: str) -> str:
+    """Регэксп Postgres на слово в `name_key` с теми же допусками, что `_same_word`.
+
+    Грубый отбор: он шире точной проверки (гласные любые и в любом числе), её
+    делает `card_matches_name` уже в Python.
+    """
+    units = []
+    for ch in _fold(word):
+        if ch in _VOWELS:
+            units.append("[aeiou]")
+        elif ch == "x":
+            units.append("(?:x|kh|h)")
+        elif ch == "k":
+            units.append("[kq]")
+        elif ch.isalnum():
+            units.append(ch)
+        else:
+            # Прочие знаки в шаблон не пускаем: обратный слэш в литерале
+            # Postgres легко теряет смысл при экранировании.
+            units.append(".")
+    # Апостроф из ключа (o', g') может стоять после любой буквы.
+    return "'?".join(units) + "'?"
 
 
 def _same_given_name(a: str, b: str) -> bool:
     fa, fb = _fold(a), _fold(b)
     # Префикс — для «Muhammad» против «Muhammadyusuf»; короче 4 букв не
     # доверяем, иначе «Ali» совпал бы с «Alisher» и «Alirizo» разом.
-    return fa == fb or (
+    return _same_word(a, b) or (
         min(len(fa), len(fb)) >= 4 and (fa.startswith(fb) or fb.startswith(fa))
     )
 
@@ -104,14 +162,22 @@ def card_matches_name(
     if len(card_words) >= 2:
         # Карточка неизвестного порядка «имя+фамилия»: все её слова есть в ФИО
         # (или наоборот — в ФИО нет отчества, а в карточке оно словом).
-        return len(set(card_words) & set(words)) >= 2 and (
-            set(card_words) <= set(words) or set(words) <= set(card_words)
+        in_words = [w for w in card_words if any(_same_word(w, x) for x in words)]
+        in_card = [w for w in words if any(_same_word(w, x) for x in card_words)]
+        return len(in_words) >= 2 and (
+            len(in_words) == len(card_words) or len(in_card) == len(words)
         )
 
-    if len(card_words) != 1 or card_words[0] not in words or not card_initials:
+    if len(card_words) != 1 or not card_initials:
         return False
-    surname = card_words[0]
-    mine = [w[0] for w in words if w != surname] + initials
+    matched = [w for w in words if _same_word(w, card_words[0])]
+    if not matched:
+        return False
+    surname = matched[0]
+    # «ў» в инициалах приводим к одной букве: «o» из ключа = «u» из профиля.
+    same = lambda i: "o" if i == "u" else i  # noqa: E731
+    mine = [same(w[0]) for w in words if w != surname] + [same(i) for i in initials]
+    card_initials = [same(i) for i in card_initials]
     # Инициалы не должны спорить: одна сторона полнее другой (в профиле нет
     # отчества, в подписи есть), но общая буква обязательна.
     if not (set(mine) & set(card_initials)) or not (
@@ -126,13 +192,24 @@ def card_matches_name(
         theirs = [
             w
             for w in _profile_name_parts(display_name)[0]
-            if _fold(w) != _fold(surname)
+            if not _same_word(w, surname)
             and not re.search(r"(ovich|evich|ovna|evna)$", w)
         ]
         for given in (w for w in words if w != surname):
-            rivals = [w for w in theirs if w[0] == given[0]]
+            rivals = [
+                w
+                for w in theirs
+                if w[0] == given[0] or _same_initial(_fold(w)[0], _fold(given)[0])
+            ]
             if rivals and not any(_same_given_name(given, r) for r in rivals):
                 return False
+        # Имя в карточке есть, но ни одно не совпало: «Ortiqova Zulfiya
+        # N.» подходила «Nargiz Artikova» по инициалу отчества.
+        givens = [w for w in words if w != surname]
+        if theirs and givens and not any(
+            _same_given_name(g, t) for g in givens for t in theirs
+        ):
+            return False
     return True
 
 
@@ -229,10 +306,13 @@ class ResearcherDomain:
         # Грубый отбор в SQL, точный — card_matches_name. Ключи бывают двух форм:
         # «фамилия|инициалы» — ищем по началу, «слово+слово» — нужны два слова
         # сразу, иначе частое имя («dilnoza») притащило бы сотни чужих карточек.
-        like = lambda w: Author.name_key.contains(w, autoescape=True)  # noqa: E731
-        conds = [Author.name_key.startswith(f"{w}|", autoescape=True) for w in words]
+        # Шаблоны терпят разнобой записи (см. _key_pattern): точное совпадение
+        # теряло «Ishkazakova» против «Ishkozokova» под статьёй.
+        key = Author.name_key
+        word = lambda w: key.op("~")(f"(^|[+]){_key_pattern(w)}([+|]|$)")  # noqa: E731
+        conds = [key.op("~")(f"^{_key_pattern(w)}[|]") for w in words]
         conds += [
-            like(a) & like(b) for i, a in enumerate(words) for b in words[i + 1:]
+            word(a) & word(b) for i, a in enumerate(words) for b in words[i + 1:]
         ]
         rows = (
             await db.execute(

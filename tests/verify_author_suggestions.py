@@ -69,6 +69,18 @@ def pure_checks():
         ("yadgarov|f", "", False),
         ("fayzullo+karimov", "Yadgarov Fayzullo", False),
         ("yadgarov", "Fayzullo Yadgarov", False),  # карточка без инициалов
+        # Разнобой записи (живые случаи 2026-09-16): гласные a/o и «ў» = o'/u.
+        ("dinora+ishkozokova", "dinora ishkazakova", True),
+        ("mustafoyev|o.r", "Utkirjon Mustafoyev", True),
+        ("mustafoyev|u.r", "O'tkirjon Mustafoyev", True),
+        ("karimov|a", "Alisher Kerimov", True),
+        # …но не всякая разница: род, согласная, длина, лишние замены.
+        ("rajabova|e", "Eldor Rajabov", False),
+        ("asadova|l", "Lola Asatova", False),
+        ("asatova|a", "Lola Asatova", False),
+        ("rahimov|a", "Alisher Karimov", False),
+        ("nazarov|a", "Alisher Nuzirov", False),  # две замены в коротком слове
+        ("dilnoza+ishkozokova", "Dinora Ishkazakova", False),  # другое имя
     ]
     for key, name, want in cases:
         check(f"{key!r} ~ {name!r}", card_matches_name(key, name), want)
@@ -82,6 +94,10 @@ def pure_checks():
         ("boymatov|b.b", "Bekzod Boymatov", "Boymatov Bekzod Bahodirovich", True),
         ("ochilov|e.f", "Фарход Очилов", "Ochilov Farhod Egamberdiyevich", True),
         ("olimova|h.m", "Маъмура Олимова", "Olimova Ma'mura Homidjon qizi", True),
+        ("mustafoyev|o.r", "Utkirjon Mustafoyev", "Mustafoyev O'tkirjon Rustamovich", True),
+        ("mustafoyev|o.r", "Umid Mustafoyev", "Mustafoyev O'tkirjon Rustamovich", False),
+        ("ortiqova|n.z", "Nargiz Artikova", "Ortiqova Zulfiya Nurmaxamatovna", False),
+        ("komiljonova|a.n", "Nozima Komiljonova", "Komiljonova Nozima Avazbek qizi", True),
         ("yadgarov|b.f", "Fayzullo Yadgarov", "Yadgarov F.B.", True),  # одни инициалы
     ]
     for key, name, display, want in with_display:
