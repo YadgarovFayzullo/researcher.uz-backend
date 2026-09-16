@@ -12,7 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.deps import get_current_profile, require_owner
 from src.domain.authors import AuthorCardDomain, AuthorCardError
-from src.domain.notifications import send_claim_approved, send_claim_rejected
+from src.domain.notifications import (
+    notify_owner_claim,
+    send_claim_approved,
+    send_claim_rejected,
+)
 from src.infrastructure.persistence.db import get_db
 from src.infrastructure.persistence.models import Profile
 
@@ -105,15 +109,20 @@ async def my_claim(
 @router.post("/{slug}/claim")
 async def request_claim(
     slug: str,
+    background: BackgroundTasks,
     note: str | None = Body(None, embed=True),
     db: AsyncSession = Depends(get_db),
     profile: Profile = Depends(get_current_profile),
 ):
     """Подать заявку. Привязки не происходит — она только после одобрения."""
     try:
-        return await domain.request_claim(db, slug, str(profile.id), note)
+        result = await domain.request_claim(db, slug, str(profile.id), note)
     except AuthorCardError as err:
         raise _bad(err) from err
+    # Повторное нажатие возвращает ту же заявку — владельцу пишем только о новой.
+    if result.pop("created", False):
+        background.add_task(notify_owner_claim, result["claim_id"])
+    return result
 
 
 @router.post("/{slug}/unclaim")

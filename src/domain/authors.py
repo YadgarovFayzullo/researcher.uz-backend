@@ -286,7 +286,9 @@ class AuthorCardDomain:
         db.add(claim)
         await db.commit()
         await db.refresh(claim)
-        return {"status": "pending", "slug": author.slug, "claim_id": str(claim.id)}
+        return {
+            "status": "pending", "slug": author.slug, "claim_id": str(claim.id), "created": True,
+        }
 
     async def my_claim(
         self, db: AsyncSession, slug: str, profile_id: str
