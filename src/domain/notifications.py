@@ -108,9 +108,13 @@ async def _send_claim_letter(claim_id: str, kind: str, expected_status: str) -> 
 NOTE_LIMIT = 500
 
 
-def claim_telegram_message(row) -> tuple[str, list[list[dict[str, str]]]]:
-    """Текст и кнопки уведомления о заявке. Всё, что ввёл пользователь,
-    экранируется: «<» в комментарии Telegram отвергает вместе с сообщением."""
+CLAIM_APPROVE = "clok"
+CLAIM_REJECT = "clno"
+
+
+def claim_telegram_message(row) -> str:
+    """Текст уведомления о заявке. Всё, что ввёл пользователь, экранируется:
+    «<» в комментарии Telegram отвергает вместе с сообщением."""
     e = telegram.escape
     lines = [
         "<b>Новая заявка «Это я»</b>",
@@ -124,41 +128,58 @@ def claim_telegram_message(row) -> tuple[str, list[list[dict[str, str]]]]:
     if row.note:
         note = row.note if len(row.note) <= NOTE_LIMIT else row.note[:NOTE_LIMIT] + "…"
         lines.append(f"Комментарий: {e(note)}")
+    return "\n".join(lines)
+
+
+def claim_buttons(row, claim_id: str) -> list[list[dict[str, str]]]:
+    # callback_data «clok:<uuid>» — 41 байт при лимите Telegram 64.
     site = settings.OUTREACH_SITE_URL.rstrip("/")
-    buttons = [[
-        {"text": "Карточка", "url": f"{site}/uz/author/{row.slug}"},
-        {"text": "Очередь заявок", "url": f"{site}/ru/admin/author-claims"},
-    ]]
-    return "\n".join(lines), buttons
+    return [
+        [
+            {"text": "✅ Принять", "callback_data": f"{CLAIM_APPROVE}:{claim_id}"},
+            {"text": "❌ Отказать", "callback_data": f"{CLAIM_REJECT}:{claim_id}"},
+        ],
+        [
+            {"text": "Карточка", "url": f"{site}/uz/author/{row.slug}"},
+            {"text": "Очередь заявок", "url": f"{site}/ru/admin/author-claims"},
+        ],
+    ]
+
+
+async def load_claim_row(db, claim_id: str):
+    return (
+        await db.execute(
+            select(
+                AuthorClaim.status,
+                AuthorClaim.note,
+                AuthorClaim.decision_reason,
+                AuthorClaim.profile_id,
+                Author.slug,
+                Author.display_name,
+                Author.works_count,
+                User.email,
+                Profile.full_name,
+                Profile.orcid_id,
+                Profile.workplace,
+            )
+            .join(Author, Author.id == AuthorClaim.author_id)
+            .join(User, User.id == AuthorClaim.profile_id)
+            .outerjoin(Profile, Profile.id == AuthorClaim.profile_id)
+            .where(AuthorClaim.id == uuid.UUID(str(claim_id)))
+        )
+    ).first()
 
 
 async def notify_owner_claim(claim_id: str) -> None:
     """Новая заявка — владельцу в Telegram: решает её только он, а в админку
     без повода не заходит. Уже решённую к моменту отправки не показываем."""
     async with AsyncSessionLocal() as db:
-        row = (
-            await db.execute(
-                select(
-                    AuthorClaim.status,
-                    AuthorClaim.note,
-                    Author.slug,
-                    Author.display_name,
-                    Author.works_count,
-                    User.email,
-                    Profile.full_name,
-                    Profile.orcid_id,
-                    Profile.workplace,
-                )
-                .join(Author, Author.id == AuthorClaim.author_id)
-                .join(User, User.id == AuthorClaim.profile_id)
-                .outerjoin(Profile, Profile.id == AuthorClaim.profile_id)
-                .where(AuthorClaim.id == uuid.UUID(str(claim_id)))
-            )
-        ).first()
+        row = await load_claim_row(db, claim_id)
     if row is None or row.status != "pending":
         return
-    text, buttons = claim_telegram_message(row)
-    await telegram.send_message(text, buttons=buttons)
+    await telegram.send_message(
+        claim_telegram_message(row), buttons=claim_buttons(row, str(claim_id))
+    )
 
 
 async def send_claim_approved(claim_id: str) -> None:

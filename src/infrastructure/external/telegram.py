@@ -63,8 +63,13 @@ async def send_message(
     *,
     chat_id: str | None = None,
     buttons: list[list[dict[str, Any]]] | None = None,
+    force_reply_placeholder: str | None = None,
 ) -> int | None:
-    """Отправить сообщение владельцу. Возвращает message_id (для правки)."""
+    """Отправить сообщение владельцу. Возвращает message_id (для правки).
+
+    `force_reply_placeholder` открывает поле ответа на это сообщение — так бот
+    спрашивает текст (причину отказа), не заводя диалогового состояния.
+    """
     target = chat_id or settings.TELEGRAM_OWNER_CHAT_ID
     if not target:
         logger.info("Telegram: chat_id владельца не задан — сообщение не отправлено")
@@ -78,6 +83,11 @@ async def send_message(
     }
     if buttons:
         payload["reply_markup"] = {"inline_keyboard": buttons}
+    elif force_reply_placeholder:
+        payload["reply_markup"] = {
+            "force_reply": True,
+            "input_field_placeholder": force_reply_placeholder[:64],
+        }
     result = await _call("sendMessage", payload)
     return result.get("message_id") if result else None
 

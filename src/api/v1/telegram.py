@@ -28,7 +28,8 @@ from src.core.config import settings
 from src.core.cookies import set_auth_cookies
 from src.core.security import create_access_token, create_refresh_token
 from src.core.telegram_auth import InitDataError, is_owner_chat, verify_init_data
-from src.domain import ai_review
+from src.domain import ai_review, claim_telegram
+from src.domain.notifications import CLAIM_APPROVE, CLAIM_REJECT
 from src.infrastructure.external import telegram
 from src.infrastructure.persistence.db import get_db
 from src.infrastructure.persistence.models import Profile, User
@@ -64,6 +65,9 @@ async def webhook(
         # он уведомляет и открывает мини-апп.
         chat_id = str((message.get("chat") or {}).get("id") or "")
         text = (message.get("text") or "").strip().lower()
+        if chat_id == str(settings.TELEGRAM_OWNER_CHAT_ID) and message.get("reply_to_message"):
+            await claim_telegram.reject_from_reply(db, chat_id, message)
+            return {"ok": True}
         if chat_id == str(settings.TELEGRAM_OWNER_CHAT_ID) and text.startswith("/start"):
             await telegram.send_message(
                 "Панель проверки выпусков.\n\n"
@@ -86,6 +90,12 @@ async def webhook(
 
     data = callback.get("data") or ""
     parts = data.split(":")
+    if len(parts) == 2 and parts[0] in (CLAIM_APPROVE, CLAIM_REJECT):
+        message_id = (callback.get("message") or {}).get("message_id")
+        handler = claim_telegram.approve if parts[0] == CLAIM_APPROVE else claim_telegram.ask_reason
+        note = await handler(db, parts[1], chat_id, message_id)
+        await telegram.answer_callback(callback["id"], note)
+        return {"ok": True}
     if len(parts) != 3 or parts[0] not in ACTIONS:
         await telegram.answer_callback(callback["id"], "Непонятная команда")
         return {"ok": True}
