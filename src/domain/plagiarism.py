@@ -18,6 +18,7 @@ winnowing-ом, поэтому доля считается от того же п
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Sequence
 
@@ -25,6 +26,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.domain.author_contacts import attach_article_contacts
 from src.domain.similarity import (
     MIN_WORDS,
     SHINGLE_SIZE,
@@ -52,6 +54,8 @@ MIN_SOURCE_SCORE = 1.0
 # Сколько источников показываем. Больше десятка редактор всё равно не смотрит.
 MAX_SOURCES = 10
 # Сколько фрагментов приводим по каждому источнику.
+logger = logging.getLogger(__name__)
+
 MAX_FRAGMENTS = 5
 # Строк отпечатков в одном INSERT. Лимит Postgres — 32767 параметров на запрос,
 # у нас три колонки на строку, поэтому берём с запасом.
@@ -101,6 +105,13 @@ class PlagiarismDomain:
                 },
             )
         )
+
+        # Заодно достаём почту авторов: текст уже в руках, а другого места, где
+        # он есть целиком, нет. Сбой разбора не должен рушить индексацию.
+        try:
+            await attach_article_contacts(db, article_id, text)
+        except Exception:
+            logger.exception("контакты авторов статьи %s не разобраны", article_id)
 
         # Переиндексация: старые отпечатки убираем целиком, иначе останутся
         # хвосты от прежней версии файла.

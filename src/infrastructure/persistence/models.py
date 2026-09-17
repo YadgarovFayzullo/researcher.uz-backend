@@ -496,6 +496,8 @@ class ArticleAuthor(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now())
     orcid = Column(Text, nullable=True)
+    # Почта из блока «Сведения об авторах» в PDF — см. src/domain/author_contacts.py.
+    email = Column(Text, nullable=True)
     author_id = Column(UUID(as_uuid=True), ForeignKey("authors.id"), nullable=True)
     # Строку дописал кабинет («Это я»), а не подпись под статьёй. Такие строки
     # не порождают карточек автора (иначе у человека их становится две) и
