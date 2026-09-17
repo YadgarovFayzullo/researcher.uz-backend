@@ -30,8 +30,11 @@ EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 LOOKALIKE_PAIRS = {"с": "c", "о": "o", "е": "e", "а": "a", "р": "p", "х": "x", "у": "y", "м": "m"}
 LOOKALIKE = str.maketrans(LOOKALIKE_PAIRS)
 _LOOK = "".join(LOOKALIKE_PAIRS)
+# Вёрстка PDF вставляет пробелы вокруг «@» и точки («ivanov @gmail. com»), а
+# перенос строки внутри адреса выглядит так же. Ищем с их допуском и убираем
+# пробелы при нормализации.
 SCAN_RE = re.compile(
-    rf"[A-Za-z0-9._%+-]+@[A-Za-z0-9.\-{_LOOK}]+\.[A-Za-z{_LOOK}]{{2,}}"
+    rf"[A-Za-z0-9._%+-]+\s{{0,2}}@\s{{0,2}}[A-Za-z0-9.\-{_LOOK}]+\s{{0,2}}\.\s{{0,2}}[A-Za-z{_LOOK}]{{2,}}"
 )
 ORCID_RE = re.compile(r"\b(\d{4}-\d{4}-\d{4}-\d{3}[\dX])\b")
 # Имя рядом с адресом: 2–4 слова с большой буквы, латиница или кириллица.
@@ -40,11 +43,17 @@ NAME_RE = re.compile(
     r"(?:\s+[A-ZА-ЯЁЎҚҒҲ][A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ’'`.\-]*){1,3}"
 )
 # Сколько знаков перед адресом считаем его окружением: в блоке сведений об
-# авторах между ФИО и почтой стоит место работы и адрес.
-WINDOW = 400
+# авторах между ФИО и почтой стоят должность, место работы и почтовый адрес —
+# на двух языках, поэтому до имени бывает далеко.
+WINDOW = 700
 
 # Ящики редакции и сервисов: они принадлежат журналу, а не автору, и письмо
 # «ваша статья» такому адресату бессмысленно.
+TLDS = frozenset({
+    "com", "ru", "uz", "org", "net", "edu", "gov", "info", "biz", "me", "io",
+    "kz", "kg", "tj", "tm", "az", "tr", "ua", "by", "pl", "de", "uk", "co", "eu",
+})
+
 ROLE_LOCALS = frozenset({
     "info", "editor", "editors", "office", "support", "admin", "journal",
     "redaktor", "no-reply", "noreply", "contact", "mail", "email", "rektor",
@@ -59,9 +68,16 @@ class Contact:
 
 
 def normalize_email(raw: str) -> str | None:
-    email = raw.strip().strip(".,;:()[]<>").lower()
+    email = re.sub(r"\s+", "", raw).strip().strip(".,;:()[]<>").lower()
     local, _, domain = email.partition("@")
-    email = f"{local}@{domain.translate(LOOKALIKE)}"
+    labels = domain.translate(LOOKALIKE).split(".")
+    # Допуск пробелов приклеивает к адресу следующее слово («mail.ru. Jurnal»);
+    # лишние хвосты отрезаем по известным доменам верхнего уровня.
+    while len(labels) > 2 and labels[-1] not in TLDS:
+        labels.pop()
+    if labels[-1] not in TLDS:
+        return None
+    email = f"{local}@{'.'.join(labels)}"
     if not EMAIL_RE.fullmatch(email) or local in ROLE_LOCALS:
         return None
     return email
@@ -84,15 +100,15 @@ def parse_contacts(text: str) -> list[Contact]:
 
 
 def _match(rows: list[ArticleAuthor], contacts: list[Contact]) -> dict:
-    """Кому какой адрес. Спорные случаи оставляем без адреса."""
-    pairs: dict[str, str] = {}
+    """Кому какой контакт. Спорные случаи оставляем без адреса."""
+    pairs: dict[str, Contact] = {}
     used: set[str] = set()
 
     by_orcid = {r.orcid: r for r in rows if r.orcid}
     for c in contacts:
         row = by_orcid.get(c.orcid) if c.orcid else None
         if row is not None and row.id not in pairs:
-            pairs[row.id] = c.email
+            pairs[row.id] = c
             used.add(c.email)
 
     for c in contacts:
@@ -104,13 +120,13 @@ def _match(rows: list[ArticleAuthor], contacts: list[Contact]) -> dict:
         ]
         # Двух однофамильцев рядом с одним адресом не разбираем.
         if len(hits) == 1:
-            pairs[hits[0].id] = c.email
+            pairs[hits[0].id] = c
             used.add(c.email)
 
     free_rows = [r for r in rows if r.id not in pairs]
-    free_mails = [c.email for c in contacts if c.email not in used]
-    if len(free_rows) == 1 and len(free_mails) == 1:
-        pairs[free_rows[0].id] = free_mails[0]
+    free = [c for c in contacts if c.email not in used]
+    if len(free_rows) == 1 and len(free) == 1:
+        pairs[free_rows[0].id] = free[0]
 
     return pairs
 
@@ -145,10 +161,19 @@ async def attach_article_contacts(
     pairs = _match(rows, contacts)
 
     written = 0
+    orcids = 0
     for row in rows:
-        email = pairs.get(row.id)
-        if not email or (row.email and not overwrite):
+        contact = pairs.get(row.id)
+        if contact is None:
             continue
-        row.email = email
-        written += 1
-    return {"contacts": len(contacts), "matched": len(pairs), "written": written}
+        if not row.email or overwrite:
+            row.email = contact.email
+            written += 1
+        # ORCID из статьи ценен сам по себе: по нему человек находит свой
+        # профиль, а заявка «Это я» опознаёт его без сверки имён.
+        if contact.orcid and not row.orcid:
+            row.orcid = contact.orcid
+            orcids += 1
+    return {
+        "contacts": len(contacts), "matched": len(pairs), "written": written, "orcids": orcids,
+    }

@@ -56,7 +56,7 @@ async def main() -> int:
 
     print(f"статей с '@' в тексте: {len(ids)}; подписей с адресом уже: {before}")
 
-    totals = {"contacts": 0, "matched": 0, "written": 0, "articles": 0}
+    totals = {"contacts": 0, "matched": 0, "written": 0, "orcids": 0, "articles": 0}
     for start in range(0, len(ids), CHUNK):
         batch = ids[start:start + CHUNK]
         async with AsyncSessionLocal() as db:
@@ -86,8 +86,8 @@ async def main() -> int:
         ).scalar_one()
     verb = "записано" if args.apply else "было бы записано"
     print(
-        f"\n{verb}: {totals['written']} подписей в {totals['articles']} статьях; "
-        f"уникальных адресов в базе: {uniq}"
+        f"\n{verb}: {totals['written']} подписей в {totals['articles']} статьях, "
+        f"ORCID {totals['orcids']}; уникальных адресов в базе: {uniq}"
     )
     if not args.apply:
         print("Просмотр. Для записи добавьте --apply.")

@@ -70,12 +70,13 @@ def test_match() -> None:
 
     rows = [row("r1", "F.N. Yadgarov", orcid="0000-0002-1825-0097"), row("r2", "D.A. Karimova")]
     check("по ORCID и по имени",
-          _match(rows, contacts),
+          {k: v.email for k, v in _match(rows, contacts).items()},
           {"r1": "f.yadgarov@gmail.com", "r2": "dilnoza.karimova@mail.ru"})
 
     one = [row("solo", "Кто-то Совсем Другой")]
     check("один автор и один адрес — связываем напрямую",
-          _match(one, [Contact("x@gmail.com", None, ())]), {"solo": "x@gmail.com"})
+          {k: v.email for k, v in _match(one, [Contact("x@gmail.com", None, ())]).items()},
+          {"solo": "x@gmail.com"})
 
     twins = [row("t1", "Yadgarov F."), row("t2", "Yadgarov N.")]
     check("однофамильцы с общим адресом остаются без него",
@@ -84,13 +85,38 @@ def test_match() -> None:
     # ORCID чужой строки не должен утаскивать адрес к ней.
     wrong = [row("w1", "Karimova D.", orcid="0000-0002-1825-0097")]
     check("адрес уходит к строке с этим ORCID",
-          _match(wrong, [Contact("z@gmail.com", "0000-0002-1825-0097", ())]),
+          {k: v.email for k, v in _match(wrong, [Contact("z@gmail.com", "0000-0002-1825-0097", ())]).items()},
           {"w1": "z@gmail.com"})
+
+
+SPACED = """
+Mualliflar haqida: Junaydullayev Mels Abdurasulovich, Buxoro davlat universiteti.
+[address: Uzbekistan, Bukhara M.Iqbol 11]; ORCID: https://orcid.org/0000-0002-7256-4588;
+E-mail: junaydullayevmels @gmail. com
+"""
+
+
+def test_layout() -> None:
+    print("\n--- вёрстка PDF ---")
+    contacts = parse_contacts(SPACED)
+    check("пробелы внутри адреса убираются",
+          [c.email for c in contacts], ["junaydullayevmels@gmail.com"])
+    check("ORCID из ссылки orcid.org", contacts[0].orcid, "0000-0002-7256-4588")
+
+    rows = [row("s1", "M.A. Junaydullayev")]
+    got = _match(rows, contacts)
+    check("подпись получает и адрес, и ORCID",
+          (got["s1"].email, got["s1"].orcid),
+          ("junaydullayevmels@gmail.com", "0000-0002-7256-4588"))
+
+    check("ссылка на youtube не считается адресом",
+          parse_contacts("см. https://www.youtube.com/@gunaui4933"), [])
 
 
 def main() -> int:
     test_parse()
     test_match()
+    test_layout()
     passed = sum(results)
     print(f"\n{passed}/{len(results)} проверок пройдено")
     return 0 if passed == len(results) else 1
