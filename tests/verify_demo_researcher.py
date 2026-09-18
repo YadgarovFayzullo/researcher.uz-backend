@@ -124,6 +124,15 @@ async def main() -> int:
         card = Author(name_key=f"demores|x.{suffix}", slug=f"demores-card-{suffix}",
                       display_name=f"{TAG} Card", works_count=1)
         db.add(card)
+        await db.flush()
+        # По публикации каждому: в карусель профиль пускают только с ними, и
+        # без этих строк «демо не в карусели» проходило бы само собой.
+        db.add_all([
+            ArticleAuthor(article_id=demo_art.id, profile_id=demo_id, author_order=0,
+                          author_name=f"{TAG} Demo Researcher"),
+            ArticleAuthor(article_id=real_art.id, profile_id=normal_id, author_order=0,
+                          author_name=f"{TAG} Normal Researcher"),
+        ])
         await db.commit()
         # Значения запоминаем сразу: rollback в raises() сбрасывает объекты, и
         # обращение к их атрибутам в async-сессии падает с MissingGreenlet.
@@ -134,6 +143,12 @@ async def main() -> int:
         shown = {p["id"] for p in await researcher.public_profiles(db, 50)}
         check("демо не в карусели", str(demo_id) in shown, False)
         check("обычный профиль в карусели", str(normal_id) in shown, True)
+        # Аватар ставит вход через Google всем подряд — витрина не должна
+        # набиваться пустыми карточками «0 публикаций».
+        await db.execute(delete(ArticleAuthor).where(ArticleAuthor.profile_id == normal_id))
+        await db.commit()
+        empty = {p["id"] for p in await researcher.public_profiles(db, 50)}
+        check("профиль без публикаций не в карусели", str(normal_id) in empty, False)
         check("is_demo у демо", (await researcher.get_profile_by_user_id(db, str(demo_id)))["is_demo"], True)
         check("is_demo у обычного", (await researcher.get_profile_by_user_id(db, str(normal_id)))["is_demo"], False)
 

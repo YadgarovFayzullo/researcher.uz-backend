@@ -231,6 +231,22 @@ def _nullif_empty(value: str | None) -> str | None:
 
 
 class ResearcherDomain:
+    @staticmethod
+    def _has_publications():
+        """EXISTS: к профилю привязана хотя бы одна строка авторства.
+
+        Те же две связи, по которым собирается страница исследователя:
+        `article_authors.profile_id` (кнопка «Это я») и — когда iD привязан —
+        `article_authors.orcid`. Сравнение по ORCID подмешиваем только при
+        непустом iD: `orcid == None` развернулось бы в `IS NULL` и совпало бы
+        с любой подписью без iD.
+        """
+        link = ArticleAuthor.profile_id == Profile.id
+        link = link | (
+            Profile.orcid_id.isnot(None) & (ArticleAuthor.orcid == Profile.orcid_id)
+        )
+        return select(ArticleAuthor.id).where(link).exists()
+
     async def public_profiles(
         self, db: AsyncSession, limit: int = 12
     ) -> list[dict[str, Any]]:
@@ -258,6 +274,11 @@ class ResearcherDomain:
                     Profile.avatar_url != "",
                     # Демо-профиль для показа дизайнеру/клиенту — не витрина.
                     profile_is_not_demo(),
+                    # Хотя бы одна публикация на платформе. Аватар сам по себе
+                    # признаком исследователя не был: вход через Google ставит
+                    # его всем, и в витрину попадал любой зарегистрировавшийся
+                    # с пустой карточкой «0 публикаций».
+                    self._has_publications(),
                 )
                 .order_by(Profile.created_at.desc().nullslast())
                 .limit(max(1, min(limit, 50)))
