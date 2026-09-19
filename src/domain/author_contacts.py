@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.domain import email_check
 from src.domain.author_names import may_be_same_person
 from src.infrastructure.persistence.models import ArticleAuthor, ArticleText
 
@@ -74,7 +75,14 @@ def normalize_email(raw: str) -> str | None:
     # кончающихся не буквой и не цифрой, почтовые службы не заводят.
     local_raw, at, domain_raw = email.partition("@")
     if at:
-        email = f"{local_raw.strip('-_+.'):s}@{domain_raw}"
+        local_raw = local_raw.strip("-_+.")
+        # «+998901234567sanjarnomozov2002@gmail.com»: в блоке сведений телефон
+        # стоит вплотную к адресу и склеивается с ним. Девять цифр и больше
+        # подряд в начале — это номер, а не имя ящика.
+        phone = email_check.GLUED_PHONE.match(local_raw)
+        if phone:
+            local_raw = local_raw[phone.end():]
+        email = f"{local_raw}@{domain_raw}"
     local, _, domain = email.partition("@")
     labels = domain.translate(LOOKALIKE).split(".")
     # Допуск пробелов приклеивает к адресу следующее слово («mail.ru. Jurnal»);

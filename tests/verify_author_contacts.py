@@ -110,6 +110,11 @@ def test_layout() -> None:
           normalize_email("anisa.0804.@gmail.com"), "anisa.0804@gmail.com")
     check("дефис внутри имени остаётся",
           normalize_email("o-zod@gmail.com"), "o-zod@gmail.com")
+    check("приклеенный телефон отрезается",
+          normalize_email("+998997465973sanjarnomozov2002@gmail.com"),
+          "sanjarnomozov2002@gmail.com")
+    check("цифры года в начале имени не телефон",
+          normalize_email("2004zilola@gmail.com"), "2004zilola@gmail.com")
 
     rows = [row("s1", "M.A. Junaydullayev")]
     got = _match(rows, contacts)
