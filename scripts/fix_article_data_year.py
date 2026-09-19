@@ -27,12 +27,16 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import sys
 from datetime import date, datetime, timezone
+from pathlib import Path
 
-from sqlalchemy import select
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.infrastructure.persistence.db import AsyncSessionLocal
-from src.infrastructure.persistence.models import Article, Issue
+from sqlalchemy import select  # noqa: E402
+
+from src.infrastructure.persistence.db import AsyncSessionLocal  # noqa: E402
+from src.infrastructure.persistence.models import Article, Issue  # noqa: E402
 
 
 async def main(apply: bool) -> None:
