@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Sequence
 
 from slugify import slugify
@@ -480,6 +480,21 @@ class ArticleDomain:
         # случаях прогоняем через _unique_slug: предложенный клиентом слуг тоже
         # может оказаться занятым.
         proposed = data.pop("slug", None)
+
+        # Форма добавления статьи поле «дата публикации» не собирает вовсе —
+        # только выпуск (год/том/номер). Без этой правки `data` уезжала в
+        # server_default `CURRENT_DATE`, то есть в день, когда редактор нажал
+        # «Сохранить», а не в год выпуска. Для Scholar-тега `citation_date` и
+        # JSON-LD `datePublished` (см. `publicationDateForScholar` во фронте)
+        # это читалось как настоящая точная дата и уводило статью 2024 года в
+        # «опубликовано 2026/7/10». 1 января года выпуска — тот же плейсхолдер,
+        # что использует архивный импортёр (`importing.py`), и фронт уже умеет
+        # отличать его от точной даты, откатываясь на один только год.
+        if "data" not in data and data.get("issue_id"):
+            issue = await db.get(Issue, data["issue_id"])
+            if issue and issue.year and issue.year < datetime.now(timezone.utc).year:
+                data["data"] = date(issue.year, 1, 1)
+
         new_article = Article(
             **data,
             slug=await self._unique_slug(db, proposed or article_in.title),
