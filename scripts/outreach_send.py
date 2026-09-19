@@ -63,6 +63,11 @@ from src.infrastructure.persistence.models import (  # noqa: E402
 )
 
 FIRST = ("uz-1a", "uz-1b")
+# Домены Mail.Ru: отказов там кратно больше, чем на gmail (17% против 4% на
+# отправленных, а в первой волне доходило до 42%), и часть «доставленных»
+# оседает в спаме. Владелец 19.09 велел на mail.ru не слать; в список входит
+# вся группа — bk/inbox/list/internet — это тот же приём почты.
+SKIP_DOMAINS = ("mail.ru", "bk.ru", "inbox.ru", "list.ru", "internet.ru")
 RESEND_URL = "https://api.resend.com/emails"
 # Лимит Resend по умолчанию — 2 запроса в секунду.
 PAUSE_SECONDS = 0.6
@@ -153,7 +158,8 @@ async def address_problems(rows: list[dict]) -> dict[str, str]:
 
 
 def pick(rows: list[dict], state: dict, campaign: str, min_works: int, followup_days: int,
-         min_year: int = 0, problems: dict[str, str] | None = None):
+         min_year: int = 0, problems: dict[str, str] | None = None,
+         skip_domains: tuple[str, ...] = SKIP_DOMAINS):
     sent_pairs = {(s.email, s.campaign) for s in state["sends"]}
     first_slugs = {s.author_slug for s in state["sends"] if s.campaign in FIRST}
     this_slugs = {s.author_slug for s in state["sends"] if s.campaign == campaign}
@@ -179,6 +185,9 @@ def pick(rows: list[dict], state: dict, campaign: str, min_works: int, followup_
             continue
         if problems and email in problems:
             skip("адрес не прошёл проверку")
+            continue
+        if email.rsplit("@", 1)[-1] in skip_domains:
+            skip("домен в списке пропуска")
             continue
         if email in state["suppressed"]:
             skip("в стоп-листе")
@@ -292,6 +301,8 @@ async def main() -> int:
     ap.add_argument("--confidence", default="точно",
                     help="через запятую: точно,вероятно")
     ap.add_argument("--min-works", type=int, default=0)
+    ap.add_argument("--skip-domains", default=",".join(SKIP_DOMAINS),
+                    help="не слать на эти домены (через запятую); пустая строка снимает запрет")
     ap.add_argument("--limit", type=int, default=50)
     ap.add_argument("--followup-days", type=int, default=6)
     ap.add_argument("--min-year", type=int, default=0,
@@ -317,8 +328,11 @@ async def main() -> int:
             db, {(r.get("sample_article") or "").strip() for r in rows} - {""}
         )
         problems = await address_problems(rows)
+        skip_domains = tuple(
+            d.strip().lower() for d in args.skip_domains.split(",") if d.strip()
+        )
         picked, skipped = pick(rows, state, args.campaign, args.min_works, args.followup_days,
-                               args.min_year, problems)
+                               args.min_year, problems, skip_domains)
         if problems:
             print(f"Адресов не прошли проверку: {len(problems)}")
             for email, reason in sorted(problems.items())[:15]:
