@@ -13,7 +13,7 @@
 """
 from __future__ import annotations
 
-from src.domain.author_contacts import Contact, _match, parse_contacts
+from src.domain.author_contacts import Contact, _match, normalize_email, parse_contacts
 from src.infrastructure.persistence.models import ArticleAuthor
 
 GREEN, RED, RESET = "\033[92m", "\033[91m", "\033[0m"
@@ -102,6 +102,14 @@ def test_layout() -> None:
     check("пробелы внутри адреса убираются",
           [c.email for c in contacts], ["junaydullayevmels@gmail.com"])
     check("ORCID из ссылки orcid.org", contacts[0].orcid, "0000-0002-7256-4588")
+    # «Ergashov — botirergashov258@gmail.com»: тире прилипало к имени ящика, и
+    # письмо такому адресу отскакивало (19.09, Resend).
+    check("тире перед адресом срезается",
+          normalize_email("-botirergashov258@gmail.com"), "botirergashov258@gmail.com")
+    check("точка в конце имени ящика срезается",
+          normalize_email("anisa.0804.@gmail.com"), "anisa.0804@gmail.com")
+    check("дефис внутри имени остаётся",
+          normalize_email("o-zod@gmail.com"), "o-zod@gmail.com")
 
     rows = [row("s1", "M.A. Junaydullayev")]
     got = _match(rows, contacts)

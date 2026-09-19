@@ -69,6 +69,12 @@ class Contact:
 
 def normalize_email(raw: str) -> str | None:
     email = re.sub(r"\s+", "", raw).strip().strip(".,;:()[]<>").lower()
+    # «Ergashov — botirergashov258@gmail.com»: тире перед адресом прилипает к
+    # имени ящика. Знаки по краям имени срезаем: адресов, начинающихся или
+    # кончающихся не буквой и не цифрой, почтовые службы не заводят.
+    local_raw, at, domain_raw = email.partition("@")
+    if at:
+        email = f"{local_raw.strip('-_+.'):s}@{domain_raw}"
     local, _, domain = email.partition("@")
     labels = domain.translate(LOOKALIKE).split(".")
     # Допуск пробелов приклеивает к адресу следующее слово («mail.ru. Jurnal»);
