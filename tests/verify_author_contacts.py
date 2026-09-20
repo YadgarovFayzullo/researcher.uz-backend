@@ -113,6 +113,13 @@ def test_layout() -> None:
     check("приклеенный телефон отрезается",
           normalize_email("+998997465973sanjarnomozov2002@gmail.com"),
           "sanjarnomozov2002@gmail.com")
+    # Отскочили 20.09 у Resend: «E-mail: …» в блоке сведений об авторах.
+    check("ярлык поля перед адресом отрезается",
+          normalize_email("E-mail: daxmedova634@gmail.com"), "daxmedova634@gmail.com")
+    check("ярлык через дефис отрезается",
+          normalize_email("Email-zaynabboltayeva06@gmail.com"), "zaynabboltayeva06@gmail.com")
+    check("имя, начинающееся на email, не режется",
+          normalize_email("emailova.dilnoza@gmail.com"), "emailova.dilnoza@gmail.com")
     check("цифры года в начале имени не телефон",
           normalize_email("2004zilola@gmail.com"), "2004zilola@gmail.com")
 

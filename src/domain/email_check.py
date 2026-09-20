@@ -54,6 +54,13 @@ ROLE_LOCALPART = re.compile(
 # цифры в имени ящика разрешены), но такого ящика нет — это отказ.
 GLUED_PHONE = re.compile(r"^\+?\d{9,}(?=[a-z])")
 
+# Ярлык поля, приклеившийся к адресу при извлечении текста из PDF:
+# «E-mail: daxmedova634@gmail.com» вылезает как «e-mail.daxmedova634@…», а
+# «Email-zaynab…» — как «email-zaynab…». Отскакивают такие гарантированно.
+# Голое «mail» сюда не входит: «mail@» — служебный адрес, его ловит
+# ROLE_LOCALPART, а срезать «mail» у живого ящика опаснее, чем пропустить.
+GLUED_LABEL = re.compile(r"^(e[-_.]?mail|pochta|elektron[-_.]?pochta)[-_.:]+(?=[a-z0-9])")
+
 
 def syntax_problem(email: str) -> str | None:
     email = (email or "").strip().lower()
@@ -63,6 +70,9 @@ def syntax_problem(email: str) -> str | None:
     phone = GLUED_PHONE.match(local)
     if phone:
         return f"к адресу приклеен телефон (вероятно {local[phone.end():]}@{domain})"
+    label = GLUED_LABEL.match(local)
+    if label:
+        return f"к адресу приклеен ярлык поля (вероятно {local[label.end():]}@{domain})"
     # «v@mail.ru», «7@gmail.com»: начало адреса отрезано при извлечении из PDF.
     # Порог в 2 символа, а не 4: «lola@», «niso@» — настоящие имена.
     if len(local) <= 2:

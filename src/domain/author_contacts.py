@@ -82,6 +82,11 @@ def normalize_email(raw: str) -> str | None:
         phone = email_check.GLUED_PHONE.match(local_raw)
         if phone:
             local_raw = local_raw[phone.end():]
+        # «E-mail: daxmedova634@gmail.com» — двоеточие и пробел съедаются
+        # допуском пробелов, и ярлык поля становится частью имени ящика.
+        label = email_check.GLUED_LABEL.match(local_raw)
+        if label:
+            local_raw = local_raw[label.end():]
         email = f"{local_raw}@{domain_raw}"
     local, _, domain = email.partition("@")
     labels = domain.translate(LOOKALIKE).split(".")
