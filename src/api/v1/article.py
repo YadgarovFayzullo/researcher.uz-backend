@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from src.api.deps import get_current_profile, require_owner
 from src.core.config import settings
-from src.domain.authz import can_write_article
+from src.domain.authz import can_write_article, is_owner
 from src.domain import ai_review, moderation
 from src.infrastructure.persistence.db import get_db
 from src.infrastructure.persistence.models import Article, Profile
@@ -108,13 +108,27 @@ async def create_article(
     profile: Profile = Depends(get_current_profile),
 ):
     # Авторизация по полям создаваемой строки (rls_content.sql: articles insert).
+    #
+    # `admin_id` из тела в расчёт прав НЕ берём. Раньше ветка «admin_id == uid»
+    # пропускала любую вставку, где клиент прислал свой id: с `issue_id` чужого
+    # журнала или `publisher_id` чужого издательства статья ложилась туда и
+    # публиковалась. Право на создание даёт только выпуск (journal_admins) или
+    # издательство (publishers.admin_id); владелец строки — сам создатель, и
+    # чужой `admin_id` не-owner подставить не может.
+    if not is_owner(profile.role):
+        if article_in.admin_id is not None and str(article_in.admin_id) != str(profile.id):
+            raise _forbidden()
+        if article_in.issue_id is None and article_in.publisher_id is None:
+            # Самостоятельное издание без издательства заводит только owner
+            # (`/admin/publications/new` — owner-only и в middleware фронта).
+            raise _forbidden()
     allowed = await can_write_article(
         db,
         role=profile.role,
         user_id=profile.id,
         issue_id=article_in.issue_id,
-        admin_id=getattr(article_in, "admin_id", None),
-        publisher_id=getattr(article_in, "publisher_id", None),
+        admin_id=None,
+        publisher_id=article_in.publisher_id,
     )
     if not allowed:
         raise _forbidden()
@@ -154,8 +168,7 @@ async def update_article(
     existing = await domain.get_article_by_id(db, id)
     if not existing:
         raise HTTPException(status_code=404, detail="Article not found")
-    # Право на существующую строку (RLS `using`). ArticleUpdate не меняет
-    # issue_id/admin_id/publisher_id, поэтому `with check` == `using`.
+    # Право на существующую строку (RLS `using`).
     allowed = await can_write_article(
         db,
         role=profile.role,
@@ -166,6 +179,23 @@ async def update_article(
     )
     if not allowed:
         raise _forbidden()
+    # Перенос в другой выпуск/издательство — ещё и право на цель (`with check`):
+    # иначе редактор одного журнала переложил бы свою статью в чужой выпуск.
+    # Ветка admin_id здесь не считается — она даёт права на строку, а не на цель.
+    changes = article_in.model_dump(exclude_unset=True, by_alias=False)
+    target_issue = changes.get("issue_id", existing.issue_id)
+    target_publisher = changes.get("publisher_id", existing.publisher_id)
+    if target_issue != existing.issue_id or target_publisher != existing.publisher_id:
+        allowed = await can_write_article(
+            db,
+            role=profile.role,
+            user_id=profile.id,
+            issue_id=target_issue,
+            admin_id=None,
+            publisher_id=target_publisher,
+        )
+        if not allowed:
+            raise _forbidden()
     article = await domain.update_article(db, id, article_in)
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")

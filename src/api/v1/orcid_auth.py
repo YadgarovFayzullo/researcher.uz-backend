@@ -16,6 +16,8 @@ ORCID со scope /authenticate не отдаёт email — аккаунт соз
 """
 from __future__ import annotations
 
+import hmac
+import secrets
 import urllib.parse
 
 import httpx
@@ -39,6 +41,11 @@ auth_domain = AuthDomain()
 
 # Куда вернуть после входа; ставится на /login, читается в /callback.
 _NEXT_COOKIE = "orcid_oauth_next"
+# OAuth `state`: случайная метка в cookie, сверяется в /callback. Без неё
+# злоумышленник мог подсунуть жертве свой `code` и привязать свой ORCID к её
+# аккаунту (login CSRF).
+_STATE_COOKIE = "orcid_oauth_state"
+_STATE_MAX_AGE = 600
 
 
 def _base() -> str:
@@ -69,14 +76,21 @@ def _require_config() -> None:
 async def orcid_login(request: Request):
     _require_config()
     locale = request.query_params.get("locale", "ru")
+    state = secrets.token_urlsafe(32)
     params = {
         "client_id": settings.ORCID_CLIENT_ID,
         "response_type": "code",
         "scope": "/authenticate",
         "redirect_uri": f"{settings.ORCID_REDIRECT_URI}?locale={locale}",
+        "state": state,
     }
     resp = RedirectResponse(
         _base() + "/oauth/authorize?" + urllib.parse.urlencode(params)
+    )
+    resp.set_cookie(
+        _STATE_COOKIE, state, max_age=_STATE_MAX_AGE, httponly=True,
+        secure=settings.COOKIE_SECURE, samesite=settings.COOKIE_SAMESITE,
+        path="/",
     )
     # Куда вернуть после входа — в cookie, а не в redirect_uri: тот
     # зарегистрирован у ORCID, и лишний параметр в нём ломает сверку адреса.
@@ -144,6 +158,12 @@ async def orcid_callback(
             status_code=status.HTTP_302_FOUND,
         )
 
+    # Сверка state — до обмена кода: чужой callback не должен дойти до ORCID.
+    sent_state = request.query_params.get("state") or ""
+    saved_state = request.cookies.get(_STATE_COOKIE) or ""
+    if not saved_state or not hmac.compare_digest(sent_state, saved_state):
+        return _login_err("state_mismatch")
+
     code = request.query_params.get("code")
     if not code:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Missing authorization code")
@@ -207,6 +227,7 @@ async def orcid_callback(
     )
     if back:
         resp.delete_cookie(_NEXT_COOKIE, path="/")
+    resp.delete_cookie(_STATE_COOKIE, path="/")
     if issue_session:
         set_auth_cookies(
             resp,

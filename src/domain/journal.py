@@ -7,6 +7,7 @@ from slugify import slugify
 from src.domain.demo import journal_is_not_demo
 from src.infrastructure.persistence.models import Issue, Journal
 from src.schemas.journal import JournalCreate, JournalPublic, JournalUpdate
+from src.domain.moderation import merge_client_meta
 
 class JournalDomain:
     def generate_slug(self, text: str) -> str:
@@ -106,9 +107,11 @@ class JournalDomain:
         if not journal:
             return None
 
-        for field, value in journal_in.model_dump(
-            exclude_unset=True, by_alias=False
-        ).items():
+        data = journal_in.model_dump(exclude_unset=True, by_alias=False)
+        if "meta" in data:
+            # Слияние: флаг `demo` ставит сервер, форма журнала его не видит.
+            merge_client_meta(journal, data.pop("meta"))
+        for field, value in data.items():
             setattr(journal, field, value)
 
         await db.commit()

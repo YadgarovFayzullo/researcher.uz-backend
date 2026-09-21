@@ -66,6 +66,22 @@ async def get_current_profile(
     return profile
 
 
+async def get_optional_profile(
+    user: User | None = Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+) -> Profile | None:
+    """Профиль, если сессия есть и аккаунт активен; иначе None (без 401).
+
+    Для публичных ручек, которые залогиненному показывают больше — например
+    черновик статьи её редактору."""
+    if user is None:
+        return None
+    profile = await _auth.get_profile(db, user.id)
+    if profile is None or profile.role not in VALID_ROLES:
+        return None
+    return profile
+
+
 async def require_owner(
     profile: Profile = Depends(get_current_profile),
 ) -> Profile:

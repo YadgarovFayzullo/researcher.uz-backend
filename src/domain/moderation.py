@@ -37,6 +37,43 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Ключи `metadata`, которые пишет только сервер: санкции модерации, очередь
+# автопроверки, демо-флаги, разбор PDF при импорте. Клиентский PATCH их не
+# трогает — ни перезаписью, ни удалением.
+SERVER_META_KEYS = frozenset(
+    {"takedown", "blocked", "ai_review", "demo", "demo_login", "pdf_meta"}
+)
+
+
+def merge_client_meta(obj: Any, incoming: dict[str, Any] | None) -> None:
+    """Применить `metadata` из тела PATCH, не теряя серверных ключей.
+
+    Формы шлют только свои ключи (AddPublication — пять полей издания), и
+    `setattr(article, "meta", incoming)` затирал бы всё остальное: снятая за
+    нарушение статья теряла `takedown`, погашенный выпуск — `blocked`, а
+    статья из очереди автопроверки — `ai_review`, то есть модерация
+    отменялась одним сохранением формы. Поэтому слияние: присланные ключи
+    обновляются, `null` удаляет ключ, серверные ключи остаются как были.
+    Явный `metadata: null` очищает только клиентские ключи.
+    """
+    current = dict(obj.meta or {})
+    kept = {k: v for k, v in current.items() if k in SERVER_META_KEYS}
+    if incoming is None:
+        merged = kept
+    else:
+        merged = {k: v for k, v in current.items() if k not in SERVER_META_KEYS}
+        for key, value in incoming.items():
+            if key in SERVER_META_KEYS:
+                continue
+            if value is None:
+                merged.pop(key, None)
+            else:
+                merged[key] = value
+        merged.update(kept)
+    obj.meta = merged
+    flag_modified(obj, "meta")
+
+
 def set_meta(obj: Any, key: str, value: Any) -> None:
     """Записать ключ в JSONB-колонку `metadata`.
 

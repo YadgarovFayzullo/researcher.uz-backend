@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     ORCID_REDIRECT_URI: str | None = None
     ORCID_ENV: str = "production"  # 'sandbox' | 'production'
 
+    # --- Zenodo (депонирование статьи → внешний DOI) ---
+    # Токен живёт только здесь: раньше он лежал в NEXT_PUBLIC_ZENODO_TOKEN
+    # фронта и уезжал в браузерный бандл каждому посетителю.
+    ZENODO_TOKEN: str | None = None
+    ZENODO_API_BASE: str = "https://zenodo.org/api"
+
     # OpenAlex (цитирования) — ключ не нужен, mailto = polite pool
     OPENALEX_MAILTO: str = "info@researcher.uz"
 

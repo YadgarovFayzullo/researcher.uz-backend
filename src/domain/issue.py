@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.domain.serialization import row_to_dict
 from src.infrastructure.persistence.models import Article, ConferenceSection, Issue
 from src.schemas.issue import IssueCreate, IssueUpdate
+from src.domain.moderation import merge_client_meta
 
 
 class IssueNotEmptyError(Exception):
@@ -94,7 +95,11 @@ class IssueDomain:
         if not issue:
             return None
         # exclude_unset: не затираем поля, которых не было в теле запроса.
-        for field, value in issue_in.model_dump(exclude_unset=True).items():
+        data = issue_in.model_dump(exclude_unset=True)
+        if "meta" in data:
+            # Слияние: `blocked`/`ai_review` ставит сервер, форма их не видит.
+            merge_client_meta(issue, data.pop("meta"))
+        for field, value in data.items():
             setattr(issue, field, value)
         await db.commit()
         await db.refresh(issue)

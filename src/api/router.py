@@ -20,6 +20,7 @@ from src.api.v1 import (
     researcher,
     files,
     uploads,
+    zenodo,
     search,
     news,
     security,
@@ -70,6 +71,8 @@ api_router.include_router(researcher.router, prefix="/researcher", tags=["resear
 # Storage / R2 (Фаза 6)
 api_router.include_router(files.router, tags=["files"])  # /pdf/<filename>
 api_router.include_router(uploads.router, prefix="/storage", tags=["storage"])
+# Депонирование в Zenodo — токен на сервере, форма шлёт файл сюда
+api_router.include_router(zenodo.router, prefix="/zenodo", tags=["zenodo"])
 
 # Поиск (Фаза 7)
 api_router.include_router(search.router, prefix="/search", tags=["search"])

@@ -197,7 +197,10 @@ class AuthorDomain:
             .join(Article, Article.id == ArticleAuthor.article_id)
             .outerjoin(Issue, Issue.id == Article.issue_id)
             .outerjoin(Journal, Journal.id == Issue.journal_id)
-            .where(where)
+            # Только опубликованное: черновики, снятые за нарушение и статьи
+            # погашенных выпусков на публичный профиль и в «Список научных
+            # трудов» не попадают — иначе санкция обходилась через профиль.
+            .where(where, Article.published.is_(True))
             .order_by(Article.data.desc().nullslast(), Article.id.desc())
         )
         # Одна статья — одна карточка, даже если на профиль ссылаются две

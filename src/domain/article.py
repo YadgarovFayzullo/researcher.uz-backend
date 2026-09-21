@@ -25,6 +25,7 @@ from src.infrastructure.persistence.models import (
     SavedArticle,
 )
 from src.schemas.article import ArticleCreate, ArticleUpdate
+from src.domain.moderation import merge_client_meta
 
 # Вектор эмбеддинга наружу не отдаём и не тянем из БД: это сотни чисел на
 # строку, на списке в тысячу статей — мегабайты впустую.
@@ -511,9 +512,11 @@ class ArticleDomain:
         article = await self.get_article_by_id(db, id)
         if not article:
             return None
-        for field, value in article_in.model_dump(
-            exclude_unset=True, by_alias=False
-        ).items():
+        data = article_in.model_dump(exclude_unset=True, by_alias=False)
+        if "meta" in data:
+            # Слияние, а не замена: см. moderation.merge_client_meta.
+            merge_client_meta(article, data.pop("meta"))
+        for field, value in data.items():
             setattr(article, field, value)
         await db.commit()
         await db.refresh(article)

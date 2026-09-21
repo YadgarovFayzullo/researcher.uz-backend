@@ -10,8 +10,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.deps import get_optional_profile
 from src.domain.article import ArticleDomain
+from src.domain.authz import can_write_article
 from src.infrastructure.persistence.db import get_db
+from src.infrastructure.persistence.models import Profile
 from src.schemas.article import ArticleListResponse, ArticlePublic
 
 router = APIRouter()
@@ -167,8 +170,30 @@ async def fields_of_science(db: AsyncSession = Depends(get_db)):
 # Объявлен после литеральных путей выше — иначе "count" и "fields-of-science"
 # уехали бы в int-параметр пути и вернули 422.
 @router.get("/by-id/{article_id}", response_model=ArticlePublic)
-async def get_article_by_id(article_id: int, db: AsyncSession = Depends(get_db)):
+async def get_article_by_id(
+    article_id: int,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile | None = Depends(get_optional_profile),
+):
+    """Статья по id — для админки, которая правит и черновики.
+
+    Неопубликованное (черновик, снятая за нарушение, погашенный выпуск)
+    отдаётся только тому, кто вправе её править; остальным — 404, как и
+    `GET /article/<slug>`. Иначе снятая статья читалась бы по числовому id
+    кем угодно, а id идут подряд.
+    """
     article = await domain.get_article_by_id(db, article_id)
     if not article:
         raise HTTPException(status_code=404, detail="Article not found")
+    if not article.published:
+        allowed = profile is not None and await can_write_article(
+            db,
+            role=profile.role,
+            user_id=profile.id,
+            issue_id=article.issue_id,
+            admin_id=article.admin_id,
+            publisher_id=article.publisher_id,
+        )
+        if not allowed:
+            raise HTTPException(status_code=404, detail="Article not found")
     return article
