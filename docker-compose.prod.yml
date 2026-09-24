@@ -1,0 +1,42 @@
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d/
+    env_file:
+      - .env.db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - internal
+      - edge
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.researcher-api.rule=Host(`api.researcher.uz`)
+      - traefik.http.routers.researcher-api.entrypoints=websecure
+      - traefik.http.routers.researcher-api.tls.certresolver=le
+      - traefik.http.services.researcher-api.loadbalancer.server.port=8000
+
+networks:
+  edge:
+    external: true
+  internal:
+
+volumes:
+  postgres_data:

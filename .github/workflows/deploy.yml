@@ -1,0 +1,46 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Sync code to server
+        run: |
+          rsync -az --delete \
+            --exclude='.venv' --exclude='__pycache__' --exclude='.git' \
+            --exclude='.pytest_cache' --exclude='*.pyc' \
+            --exclude='.scholar_cache*.json' --exclude='scholar_slugs*.txt' \
+            --exclude='.env' --exclude='.env.local' --exclude='.env.db' \
+            -e "ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=no" \
+            ./ deploy@${{ secrets.SERVER_HOST }}:/opt/apps/backend/
+
+      - name: Write production env
+        run: |
+          echo "${{ secrets.BACKEND_ENV_PRODUCTION }}" | \
+            ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes deploy@${{ secrets.SERVER_HOST }} \
+            'cat > /opt/apps/backend/.env && chmod 600 /opt/apps/backend/.env'
+
+      - name: Build and restart API container
+        run: |
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes deploy@${{ secrets.SERVER_HOST }} '
+            cd /opt/apps/backend &&
+            docker compose -f docker-compose.prod.yml up -d --build api &&
+            docker compose -f docker-compose.prod.yml ps
+          '
