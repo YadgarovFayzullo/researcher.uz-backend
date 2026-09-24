@@ -1,0 +1,12 @@
+Assalomu alaykum, $name!
+
+«$author_name» muallif sahifasi profilingizga biriktirilgan — platformadagi $works ta ishingiz shu yerda jamlangan. Lekin profilda hozircha faqat ismingiz bor.
+
+$url
+
+Rasm, ish joyi, qisqacha ma'lumot (bio) va ORCID qo'shsangiz, profilingiz hamkasblar va jurnal tahririyatlari uchun to'liqroq ko'rinadi. Buning uchun profil sahifasida «Profilni tahrirlash» tugmasini bosing.
+
+Savollar bo'lsa, shu xatga javob yozing.
+
+Hurmat bilan,
+$signature

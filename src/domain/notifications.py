@@ -28,6 +28,7 @@ SUBJECTS = {
     "claim-approved": "$name, muallif sahifangiz profilingizga biriktirildi",
     "claim-rejected": "$name, muallif sahifasi bo'yicha arizangiz ko'rib chiqildi",
     "claim-reminder": "$name, muallif sahifangizni profilingizga biriktiring",
+    "profile-fill-reminder": "$name, profilingizni to'ldiring",
 }
 
 
@@ -226,6 +227,49 @@ async def send_claim_reminder(email: str, slug: str) -> tuple[bool, str]:
     return await send_email(
         to=email, subject=letter["subject"], html=letter["html"], text=letter["text"],
         reply_to=settings.OUTREACH_REPLY_TO, tags={"type": "claim_reminder"},
+    )
+
+
+async def send_profile_fill_reminder(
+    email: str, *, user_id: str, author_name: str, works: int,
+) -> tuple[bool, str]:
+    """Напоминание одобренному автору, чей профиль так и остался пустым.
+
+    Карточка стала профилем после claim-approved, но ни места работы, ни
+    bio, ни страны, ни образования, ни ORCID человек так и не добавил.
+    avatar_url тут сознательно не смотрим: он проставляется сам из фото
+    Google-аккаунта при входе, ещё до того как человек открыл форму
+    редактирования (см. `scripts/profile_fill_reminder.py`). Перечитывает
+    профиль перед отправкой — если он уже частично заполнен, письмо не
+    уходит, второе напоминание о сделанном раздражает.
+    """
+    async with AsyncSessionLocal() as db:
+        row = (
+            await db.execute(
+                select(
+                    Profile.full_name, Profile.workplace, Profile.bio,
+                    Profile.country, Profile.education, Profile.orcid_id,
+                ).where(Profile.id == uuid.UUID(str(user_id)))
+            )
+        ).first()
+        if row is None:
+            return False, "профиль не найден"
+        if any((getattr(row, f) or "").strip() for f in
+               ("workplace", "bio", "country", "education", "orcid_id")):
+            return False, "профиль уже частично заполнен"
+
+    site = settings.OUTREACH_SITE_URL.rstrip("/")
+    values = {
+        "name": unshout((row.full_name or author_name or "").strip()),
+        "author_name": unshout(author_name),
+        "works": str(works),
+        "url": f"{site}/uz/researcher/u/{user_id}",
+        "signature": _signature(),
+    }
+    letter = render_claim_letter("profile-fill-reminder", values)
+    return await send_email(
+        to=email, subject=letter["subject"], html=letter["html"], text=letter["text"],
+        reply_to=settings.OUTREACH_REPLY_TO, tags={"type": "profile_fill_reminder"},
     )
 
 
