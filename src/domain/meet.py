@@ -29,7 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
-from src.domain.authz import can_write_issue
+from src.domain.authz import can_write_issue, is_owner
 from src.infrastructure.persistence.models import (
     Article,
     ArticleAuthor,
@@ -44,6 +44,7 @@ from src.schemas.meet import (
     ConferenceSessionCreate,
     ConferenceSessionUpdate,
     MeetRole,
+    StandaloneSessionCreate,
 )
 
 DEFAULT_SESSION_HOURS = 6
@@ -65,10 +66,12 @@ def new_invite_code() -> str:
     return secrets.token_urlsafe(9)[:12].replace("-", "x").replace("_", "y")
 
 
-def new_room_slug(issue_id: int) -> str:
-    """Слаг комнаты: читаемый префикс сборника + случайная часть. Угадать
-    нельзя, но и секретом он не является — вход всё равно по токену."""
-    return f"c{issue_id}-{secrets.token_hex(5)}"
+def new_room_slug(issue_id: int | None) -> str:
+    """Слаг комнаты: читаемый префикс сборника (или m — самостоятельная) +
+    случайная часть. Угадать нельзя, но и секретом он не является — вход всё
+    равно по токену."""
+    prefix = f"c{issue_id}" if issue_id is not None else "m"
+    return f"{prefix}-{secrets.token_hex(5)}"
 
 
 def session_window(
@@ -107,6 +110,7 @@ def make_meet_token(
     session_id: int,
     title: str | None = None,
     link: str | None = None,
+    waiting_room: bool = True,
 ) -> tuple[str, dt.datetime]:
     """JWT для воркера комнаты. Формат — контракт с meet/app/utils/meetToken.server.ts."""
     if not settings.MEET_JWT_SECRET:
@@ -123,6 +127,8 @@ def make_meet_token(
         "title": (title or "")[:200],
         # Страница сборника с кнопкой «Подключиться» — для «Поделиться» в комнате.
         "link": (link or "")[:300],
+        # false — комната пускает участников без допуска организатора.
+        "waiting": bool(waiting_room),
         "type": "meet",
         "iat": now,
         "exp": exp,
@@ -186,6 +192,36 @@ class MeetDomain:
         await db.refresh(session)
         return session
 
+    async def create_standalone(
+        self, db: AsyncSession, data: StandaloneSessionCreate, created_by
+    ) -> ConferenceSession:
+        session = ConferenceSession(
+            **data.model_dump(),
+            issue_id=None,
+            section_id=None,
+            room=new_room_slug(None),
+            invite_code=new_invite_code(),
+            created_by=created_by,
+        )
+        db.add(session)
+        await db.commit()
+        await db.refresh(session)
+        return session
+
+    async def list_mine(
+        self, db: AsyncSession, profile: Profile
+    ) -> list[ConferenceSession]:
+        """Самостоятельные сессии: свои; владелец платформы видит все."""
+        q = select(ConferenceSession).where(ConferenceSession.issue_id.is_(None))
+        if not is_owner(profile.role):
+            q = q.where(ConferenceSession.created_by == profile.id)
+        res = await db.execute(q.order_by(ConferenceSession.starts_at.desc()))
+        return list(res.scalars().all())
+
+    @staticmethod
+    def can_manage_standalone(profile: Profile, session: ConferenceSession) -> bool:
+        return is_owner(profile.role) or session.created_by == profile.id
+
     async def update_session(
         self, db: AsyncSession, session: ConferenceSession, data: ConferenceSessionUpdate
     ) -> ConferenceSession:
@@ -205,6 +241,9 @@ class MeetDomain:
     async def role_for(
         self, db: AsyncSession, profile: Profile, session: ConferenceSession
     ) -> MeetRole:
+        if session.issue_id is None:
+            # Самостоятельная сессия: организатор — создатель (и владелец).
+            return "moderator" if self.can_manage_standalone(profile, session) else "participant"
         issue = await db.get(Issue, session.issue_id)
         if issue is not None and await can_write_issue(
             db, role=profile.role, user_id=profile.id, journal_id=issue.journal_id
@@ -244,12 +283,14 @@ class MeetDomain:
         return res.scalars().first()
 
     async def invite_info(self, db: AsyncSession, session: ConferenceSession) -> dict:
-        res = await db.execute(
-            select(Issue.title, Issue.year, Journal.name, Journal.slug)
-            .join(Journal, Journal.id == Issue.journal_id)
-            .where(Issue.id == session.issue_id)
-        )
-        row = res.first()
+        row = None
+        if session.issue_id is not None:
+            res = await db.execute(
+                select(Issue.title, Issue.year, Journal.name, Journal.slug)
+                .join(Journal, Journal.id == Issue.journal_id)
+                .where(Issue.id == session.issue_id)
+            )
+            row = res.first()
         return dict(
             id=session.id,
             title=session.title,
@@ -282,6 +323,7 @@ class MeetDomain:
             session_id=session.id,
             title=session.title,
             link=self.invite_url(session),
+            waiting_room=session.waiting_room,
         )
         return join_url(token), "participant", exp
 
@@ -355,5 +397,6 @@ class MeetDomain:
             session_id=session.id,
             title=session.title,
             link=await self.event_link(db, session),
+            waiting_room=session.waiting_room,
         )
         return join_url(token), role, exp

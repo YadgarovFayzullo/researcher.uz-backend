@@ -260,8 +260,10 @@ class ConferenceSession(Base):
     )
 
     id = Column(BigInteger, Identity(always=True), primary_key=True)
+    # null — самостоятельная сессия («запланировать встречу», как в Zoom):
+    # без серии и сборника, права — у создателя (created_by) и владельца.
     issue_id = Column(
-        BigInteger, ForeignKey("issues.id", ondelete="CASCADE"), nullable=False
+        BigInteger, ForeignKey("issues.id", ondelete="CASCADE"), nullable=True
     )
     # Секция-«зал»; null — общая сессия сборника (пленарная, открытие).
     section_id = Column(
@@ -286,6 +288,8 @@ class ConferenceSession(Base):
     # гостем через зал ожидания. Не секрет комнаты (вход всё равно по токену),
     # но в публичном списке сессий не отдаётся, чтобы ссылку раздавал организатор.
     invite_code = Column(Text, nullable=False, unique=True)
+    # Зал ожидания: false — участники входят сразу, без допуска организатора.
+    waiting_room = Column(Boolean, nullable=False, server_default=text("true"))
 
     issue = relationship("Issue")
     section = relationship("ConferenceSection")

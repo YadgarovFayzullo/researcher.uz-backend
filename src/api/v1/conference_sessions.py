@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.deps import get_current_profile, get_optional_profile
 from src.core.ratelimit import limiter
 from src.core.turnstile import require_human
-from src.domain.authz import can_write_issue
+from src.domain.authz import can_write_issue, is_owner
 from src.domain.issue import IssueDomain
 from fastapi.concurrency import run_in_threadpool
 
@@ -32,6 +32,7 @@ from src.schemas.meet import (
     RecordingAttach,
     RecordingUploadRequest,
     RecordingUploadResponse,
+    StandaloneSessionCreate,
 )
 
 router = APIRouter()
@@ -49,6 +50,23 @@ async def _guard_issue(db: AsyncSession, profile: Profile, issue_id: int) -> Non
         raise HTTPException(
             status.HTTP_403_FORBIDDEN, "Not allowed to write this issue"
         )
+
+
+async def _guard_session(
+    db: AsyncSession, profile: Profile, session: ConferenceSession
+) -> None:
+    """Право править сессию: у сборника — как у сборника; у самостоятельной —
+    создатель или владелец платформы."""
+    if session.issue_id is not None:
+        await _guard_session(db, profile, session)
+    elif not domain.can_manage_standalone(profile, session):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Not your session")
+
+
+def _require_organizer(profile: Profile) -> None:
+    """Планировать самостоятельные сессии могут владелец и редакторы (admin)."""
+    if profile.role not in ("owner", "admin"):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Organizer role required")
 
 
 async def _get_or_404(db: AsyncSession, session_id: int) -> ConferenceSession:
@@ -99,6 +117,32 @@ async def invite_join(
     return JoinResponse(url=url, role=role, expires_at=exp)
 
 
+# ---------------------------------------------- самостоятельные сессии
+# «Запланировать встречу» без серии и сборника — как в Zoom. Объявлены до
+# /{session_id}, иначе "mine"/"standalone" разобрались бы как id.
+
+
+@router.get("/mine", response_model=list[ConferenceSessionPublic])
+async def list_my_sessions(
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(get_current_profile),
+):
+    _require_organizer(profile)
+    return await domain.list_mine(db, profile)
+
+
+@router.post("/standalone", response_model=ConferenceSessionPublic, status_code=201)
+async def create_standalone(
+    data: StandaloneSessionCreate,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(get_current_profile),
+):
+    _require_organizer(profile)
+    if data.ends_at is not None and data.ends_at <= data.starts_at:
+        raise HTTPException(status_code=422, detail="ends_at must be after starts_at")
+    return await domain.create_standalone(db, data, created_by=profile.id)
+
+
 @router.get("/", response_model=list[ConferenceSessionPublic])
 async def list_sessions(
     issue_id: int = Query(...), db: AsyncSession = Depends(get_db)
@@ -127,7 +171,7 @@ async def update_session(
     profile: Profile = Depends(get_current_profile),
 ):
     session = await _get_or_404(db, session_id)
-    await _guard_issue(db, profile, session.issue_id)
+    await _guard_session(db, profile, session)
     try:
         return await domain.update_session(db, session, data)
     except ValueError as e:
@@ -141,7 +185,7 @@ async def delete_session(
     profile: Profile = Depends(get_current_profile),
 ):
     session = await _get_or_404(db, session_id)
-    await _guard_issue(db, profile, session.issue_id)
+    await _guard_session(db, profile, session)
     await domain.delete_session(db, session)
 
 
@@ -153,7 +197,7 @@ async def invite_link(
 ):
     """Прямая ссылка — организатору, чтобы раздать участникам."""
     session = await _get_or_404(db, session_id)
-    await _guard_issue(db, profile, session.issue_id)
+    await _guard_session(db, profile, session)
     return InviteLink(code=session.invite_code, url=domain.invite_url(session))
 
 
@@ -191,7 +235,7 @@ async def recording_upload_url(
     profile: Profile = Depends(get_current_profile),
 ):
     session = await _get_or_404(db, session_id)
-    await _guard_issue(db, profile, session.issue_id)
+    await _guard_session(db, profile, session)
     if not data.content_type.startswith(("video/", "audio/")):
         raise HTTPException(status_code=422, detail="Only video or audio files")
     key = domain.recording_key(session, data.filename)
@@ -214,7 +258,7 @@ async def attach_recording(
     profile: Profile = Depends(get_current_profile),
 ):
     session = await _get_or_404(db, session_id)
-    await _guard_issue(db, profile, session.issue_id)
+    await _guard_session(db, profile, session)
     try:
         return await domain.attach_recording(db, session, data.key)
     except ValueError as e:
@@ -230,5 +274,5 @@ async def remove_recording(
     profile: Profile = Depends(get_current_profile),
 ):
     session = await _get_or_404(db, session_id)
-    await _guard_issue(db, profile, session.issue_id)
+    await _guard_session(db, profile, session)
     return await domain.remove_recording(db, session)

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -24,19 +25,31 @@ class ConferenceSessionUpdate(BaseModel):
     starts_at: datetime.datetime | None = None
     ends_at: datetime.datetime | None = None
     status: SessionStatus | None = None
+    waiting_room: bool | None = None
+
+
+class StandaloneSessionCreate(BaseModel):
+    """«Запланировать встречу» без серии и сборника."""
+
+    title: str = Field(min_length=1, max_length=200)
+    starts_at: datetime.datetime
+    ends_at: datetime.datetime | None = None
+    waiting_room: bool = True
 
 
 class ConferenceSessionPublic(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    issue_id: int
+    issue_id: int | None = None
     section_id: int | None = None
     title: str
     starts_at: datetime.datetime
     ends_at: datetime.datetime | None = None
     room: str
     status: SessionStatus
+    waiting_room: bool = True
+    created_by: UUID | None = None
     created_at: datetime.datetime | None = None
     recording_url: str | None = None
     recording_size: int | None = None
@@ -81,7 +94,7 @@ class InviteInfo(BaseModel):
     starts_at: datetime.datetime
     ends_at: datetime.datetime | None = None
     status: SessionStatus
-    issue_id: int
+    issue_id: int | None = None
     event_title: str | None = None
     series_name: str | None = None
     series_slug: str | None = None

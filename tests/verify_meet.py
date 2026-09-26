@@ -42,7 +42,11 @@ from src.infrastructure.persistence.models import (
     Profile,
     User,
 )
-from src.schemas.meet import ConferenceSessionCreate, ConferenceSessionUpdate
+from src.schemas.meet import (
+    ConferenceSessionCreate,
+    ConferenceSessionUpdate,
+    StandaloneSessionCreate,
+)
 
 PASS, FAIL = "\033[92mPASS\033[0m", "\033[91mFAIL\033[0m"
 results: list[bool] = []
@@ -249,6 +253,28 @@ async def main():
             except SessionClosed as e:
                 check("cancelled blocks moderator too", e.reason, "cancelled")
 
+            print("самостоятельные сессии:")
+            solo = await domain.create_standalone(
+                db,
+                StandaloneSessionCreate(title="Планёрка", starts_at=now - dt.timedelta(minutes=5), waiting_room=False),
+                created_by=users["jadmin"].id,
+            )
+            check("room prefix m-", solo.room.startswith("m-"), True)
+            check("issue_id is None", solo.issue_id, None)
+            check("creator is moderator", await domain.role_for(db, profiles["jadmin"], solo), "moderator")
+            check("owner is moderator", await domain.role_for(db, profiles["owner"], solo), "moderator")
+            check("other admin is participant", await domain.role_for(db, profiles["other_admin"], solo), "participant")
+            check("can_manage: creator", domain.can_manage_standalone(profiles["jadmin"], solo), True)
+            check("can_manage: other admin", domain.can_manage_standalone(profiles["other_admin"], solo), False)
+            mine = await domain.list_mine(db, profiles["jadmin"])
+            check("list_mine has it", any(x.id == solo.id for x in mine), True)
+            mine_other = await domain.list_mine(db, profiles["other_admin"])
+            check("list_mine hides others'", any(x.id == solo.id for x in mine_other), False)
+            surl, _, _ = await domain.join(db, profiles["plain"], solo)
+            sp = jwt.decode(surl.split("t=", 1)[1], settings.MEET_JWT_SECRET, algorithms=["HS256"])
+            check("token.waiting false", sp["waiting"], False)
+            info = await domain.invite_info(db, solo)
+            check("invite info without series", info["series_slug"], None)
             print("список:")
             rows = await domain.list_sessions(db, event.id)
             check("two sessions, ordered by start", [r.title for r in rows], ["Секция идёт", "Пленарное"])
@@ -266,6 +292,7 @@ async def main():
         finally:
             await db.rollback()
             await db.execute(delete(ConferenceSession).where(ConferenceSession.issue_id.in_(ids["events"])))
+            await db.execute(delete(ConferenceSession).where(ConferenceSession.created_by.in_(ids["users"])))
             await db.execute(delete(ArticleAuthor).where(ArticleAuthor.article_id == ids["talk"]))
             await db.execute(delete(Article).where(Article.id == ids["talk"]))
             await db.execute(delete(ConferenceSection).where(ConferenceSection.id.in_(ids["sections"])))
