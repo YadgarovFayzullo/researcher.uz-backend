@@ -17,7 +17,7 @@ from urllib.parse import quote, unquote, urlparse
 from src.core.config import settings
 
 # Известные бакеты Supabase → префиксы ключей в едином R2-бакете.
-KNOWN_PREFIXES = ("pdfs", "cover", "avatars", "news")
+KNOWN_PREFIXES = ("pdfs", "cover", "avatars", "news", "recordings")
 
 
 class StorageNotConfigured(RuntimeError):
@@ -149,6 +149,26 @@ class Storage:
 
     def delete(self, key: str) -> None:
         _client().delete_object(Bucket=self.bucket, Key=key)
+
+    def presigned_put_url(
+        self, key: str, content_type: str, expires_seconds: int = 3600
+    ) -> str:
+        """Подписанный URL для прямой загрузки браузером (PUT). Нужен для
+        файлов, которые через API не прогнать: запись сессии весит гигабайты,
+        а у сервера 2 ГБ памяти. CORS на бакете должен пускать PUT с сайта."""
+        return _client().generate_presigned_url(
+            "put_object",
+            Params={"Bucket": self.bucket, "Key": key, "ContentType": content_type},
+            ExpiresIn=expires_seconds,
+        )
+
+    def head(self, key: str) -> dict | None:
+        """Метаданные объекта (размер, тип) или None, если его нет."""
+        try:
+            r = _client().head_object(Bucket=self.bucket, Key=key)
+            return {"size": r.get("ContentLength"), "content_type": r.get("ContentType")}
+        except Exception:
+            return None
 
     def exists(self, key: str) -> bool:
         try:

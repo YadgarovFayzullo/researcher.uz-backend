@@ -199,6 +199,15 @@ async def main():
             check("token.sid", payload["sid"], live.id)
             check("token.type", payload["type"], "meet")
             check("token.title", payload["title"], "Секция идёт")
+            check("token.link", payload["link"], f"https://researcher.uz/uz/conference/{series.slug}/{event.id}")
+            print("запись:")
+            check("recording key prefix", domain.recording_key(live, "x.webm").startswith(f"recordings/{live.room}-"), True)
+            check("recording key ext sanitized", domain.recording_key(live, "x.../etc").endswith(".webm"), True)
+            try:
+                await domain.attach_recording(db, live, "recordings/other-room-1.webm")
+                check("foreign key rejected", False, True)
+            except ValueError as e:
+                check("foreign key rejected", str(e), "foreign_key")
             check("token.name", payload["name"], profiles["speaker"].full_name)
             check("token.sub", payload["sub"], str(users["speaker"].id))
             hours = (exp - now).total_seconds() / 3600

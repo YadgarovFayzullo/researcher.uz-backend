@@ -13,7 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.deps import get_current_profile
 from src.domain.authz import can_write_issue
 from src.domain.issue import IssueDomain
+from fastapi.concurrency import run_in_threadpool
+
 from src.domain.meet import MeetDisabled, MeetDomain, SessionClosed
+from src.infrastructure.storage import StorageNotConfigured, public_url, storage
 from src.infrastructure.persistence.db import get_db
 from src.infrastructure.persistence.models import ConferenceSession, Profile
 from src.schemas.meet import (
@@ -21,6 +24,9 @@ from src.schemas.meet import (
     ConferenceSessionPublic,
     ConferenceSessionUpdate,
     JoinResponse,
+    RecordingAttach,
+    RecordingUploadRequest,
+    RecordingUploadResponse,
 )
 
 router = APIRouter()
@@ -110,3 +116,61 @@ async def join_session(
     except MeetDisabled:
         raise HTTPException(status_code=503, detail="Meet is not configured")
     return JoinResponse(url=url, role=role, expires_at=exp)
+
+
+# ------------------------------------------------------------------ запись
+# Файл идёт из браузера организатора прямо в R2 по подписанному URL: через
+# API запись на гигабайты не прогнать. Права — как на правку сессии.
+
+UPLOAD_URL_TTL = 6 * 3600  # загрузка 1–2 ГБ по медленному каналу — часы
+
+
+@router.post("/{session_id}/recording/upload-url", response_model=RecordingUploadResponse)
+async def recording_upload_url(
+    session_id: int,
+    data: RecordingUploadRequest,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(get_current_profile),
+):
+    session = await _get_or_404(db, session_id)
+    await _guard_issue(db, profile, session.issue_id)
+    if not data.content_type.startswith(("video/", "audio/")):
+        raise HTTPException(status_code=422, detail="Only video or audio files")
+    key = domain.recording_key(session, data.filename)
+    try:
+        url = await run_in_threadpool(
+            storage.presigned_put_url, key, data.content_type, UPLOAD_URL_TTL
+        )
+    except StorageNotConfigured:
+        raise HTTPException(status_code=503, detail="Storage not configured")
+    return RecordingUploadResponse(
+        upload_url=url, key=key, public_url=public_url(key) or key, expires_in=UPLOAD_URL_TTL
+    )
+
+
+@router.put("/{session_id}/recording", response_model=ConferenceSessionPublic)
+async def attach_recording(
+    session_id: int,
+    data: RecordingAttach,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(get_current_profile),
+):
+    session = await _get_or_404(db, session_id)
+    await _guard_issue(db, profile, session.issue_id)
+    try:
+        return await domain.attach_recording(db, session, data.key)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except StorageNotConfigured:
+        raise HTTPException(status_code=503, detail="Storage not configured")
+
+
+@router.delete("/{session_id}/recording", response_model=ConferenceSessionPublic)
+async def remove_recording(
+    session_id: int,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(get_current_profile),
+):
+    session = await _get_or_404(db, session_id)
+    await _guard_issue(db, profile, session.issue_id)
+    return await domain.remove_recording(db, session)

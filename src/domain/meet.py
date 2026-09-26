@@ -35,8 +35,10 @@ from src.infrastructure.persistence.models import (
     ConferenceSection,
     ConferenceSession,
     Issue,
+    Journal,
     Profile,
 )
+from src.infrastructure.storage import public_url, storage
 from src.schemas.meet import (
     ConferenceSessionCreate,
     ConferenceSessionUpdate,
@@ -99,6 +101,7 @@ def make_meet_token(
     role: MeetRole,
     session_id: int,
     title: str | None = None,
+    link: str | None = None,
 ) -> tuple[str, dt.datetime]:
     """JWT для воркера комнаты. Формат — контракт с meet/app/utils/meetToken.server.ts."""
     if not settings.MEET_JWT_SECRET:
@@ -113,6 +116,8 @@ def make_meet_token(
         "sid": session_id,
         # Заголовок сессии для шапки комнаты; воркер своей базы не имеет.
         "title": (title or "")[:200],
+        # Страница сборника с кнопкой «Подключиться» — для «Поделиться» в комнате.
+        "link": (link or "")[:300],
         "type": "meet",
         "iat": now,
         "exp": exp,
@@ -212,6 +217,70 @@ class MeetDomain:
             return "speaker"
         return "participant"
 
+    async def event_link(self, db: AsyncSession, session: ConferenceSession) -> str | None:
+        """Публичный адрес сборника (канонический /uz/...), откуда участники входят."""
+        res = await db.execute(
+            select(Journal.slug)
+            .join(Issue, Issue.journal_id == Journal.id)
+            .where(Issue.id == session.issue_id)
+        )
+        slug = res.scalar_one_or_none()
+        if not slug:
+            return None
+        base = (settings.FRONTEND_URL or "https://researcher.uz").rstrip("/")
+        return f"{base}/uz/conference/{slug}/{session.issue_id}"
+
+    def recording_key(self, session: ConferenceSession, filename: str) -> str:
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "webm"
+        if not ext.isalnum() or len(ext) > 5:
+            ext = "webm"
+        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
+        return f"recordings/{session.room}-{stamp}.{ext}"
+
+    async def attach_recording(
+        self, db: AsyncSession, session: ConferenceSession, key: str
+    ) -> ConferenceSession:
+        """Ключ принимаем только из своего префикса и только если объект
+        реально лежит в R2 — иначе в карточку можно было бы вписать что угодно."""
+        if not key.startswith(f"recordings/{session.room}-"):
+            raise ValueError("foreign_key")
+        meta = storage.head(key)
+        if not meta:
+            raise ValueError("object_missing")
+        old = session.recording_url
+        session.recording_url = public_url(key) or key
+        session.recording_size = meta.get("size")
+        session.recording_uploaded_at = dt.datetime.now(dt.timezone.utc)
+        await db.commit()
+        await db.refresh(session)
+        if old and old != session.recording_url:
+            self._delete_object_by_url(old)
+        return session
+
+    async def remove_recording(
+        self, db: AsyncSession, session: ConferenceSession
+    ) -> ConferenceSession:
+        old = session.recording_url
+        session.recording_url = None
+        session.recording_size = None
+        session.recording_uploaded_at = None
+        await db.commit()
+        await db.refresh(session)
+        if old:
+            self._delete_object_by_url(old)
+        return session
+
+    @staticmethod
+    def _delete_object_by_url(url: str) -> None:
+        from src.infrastructure.storage import key_from_url
+
+        key = key_from_url(url, default_prefix="recordings")
+        if key and key.startswith("recordings/"):
+            try:
+                storage.delete(key)
+            except Exception:
+                pass  # файла может уже не быть — карточку это не должно ломать
+
     async def join(
         self, db: AsyncSession, profile: Profile, session: ConferenceSession
     ) -> tuple[str, MeetRole, dt.datetime]:
@@ -230,5 +299,6 @@ class MeetDomain:
             role=role,
             session_id=session.id,
             title=session.title,
+            link=await self.event_link(db, session),
         )
         return join_url(token), role, exp

@@ -38,6 +38,9 @@ class ConferenceSessionPublic(BaseModel):
     room: str
     status: SessionStatus
     created_at: datetime.datetime | None = None
+    recording_url: str | None = None
+    recording_size: int | None = None
+    recording_uploaded_at: datetime.datetime | None = None
 
 
 class JoinResponse(BaseModel):
@@ -47,3 +50,24 @@ class JoinResponse(BaseModel):
     url: str
     role: MeetRole
     expires_at: datetime.datetime
+
+
+class RecordingUploadRequest(BaseModel):
+    """Организатор просит адрес для прямой загрузки файла записи в R2."""
+
+    filename: str = Field(min_length=1, max_length=200)
+    content_type: str = Field(default="video/webm", max_length=100)
+    size: int = Field(gt=0, le=5 * 1024 * 1024 * 1024)
+
+
+class RecordingUploadResponse(BaseModel):
+    upload_url: str
+    key: str
+    public_url: str
+    expires_in: int
+
+
+class RecordingAttach(BaseModel):
+    """После PUT в R2 фронт сообщает ключ; сервер сверяет, что объект есть."""
+
+    key: str = Field(min_length=1, max_length=300)

@@ -277,6 +277,11 @@ class ConferenceSession(Base):
     status = Column(Text, nullable=False, server_default=text("'scheduled'::text"))
     created_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Запись сессии: организатор пишет её в браузере и загружает в R2 напрямую
+    # по подписанному URL; здесь — публичный адрес файла и когда загружен.
+    recording_url = Column(Text, nullable=True)
+    recording_size = Column(BigInteger, nullable=True)
+    recording_uploaded_at = Column(DateTime(timezone=True), nullable=True)
 
     issue = relationship("Issue")
     section = relationship("ConferenceSection")
