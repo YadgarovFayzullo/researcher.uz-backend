@@ -6,6 +6,7 @@ from src.api.v1 import (
     issues,
     publishers,
     sections,
+    conference_sessions,
     articles,
     article_content,
     library,
@@ -41,6 +42,12 @@ api_router.include_router(issues.router, prefix="/issues", tags=["issues"])
 api_router.include_router(publishers.router, prefix="/publishers", tags=["publishers"])
 api_router.include_router(
     sections.router, prefix="/conference-sections", tags=["conference-sections"]
+)
+# Онлайн-сессии конференций: расписание комнат + выдача входа на meet.researcher.uz.
+api_router.include_router(
+    conference_sessions.router,
+    prefix="/conference-sessions",
+    tags=["conference-sessions"],
 )
 api_router.include_router(articles.router, prefix="/articles", tags=["articles"])
 api_router.include_router(authors.router, prefix="/authors", tags=["authors"])

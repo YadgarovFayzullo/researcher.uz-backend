@@ -241,6 +241,47 @@ class ConferenceSection(Base):
     issue = relationship("Issue", back_populates="sections")
 
 
+
+class ConferenceSession(Base):
+    """Онлайн-сессия конференции: комната видеосвязи, привязанная к сборнику.
+
+    Само видео живёт на meet.researcher.uz (форк Orange Meets на Cloudflare
+    Realtime SFU); здесь — расписание и адрес комнаты. Вход в комнату выдаёт
+    `POST /conference-sessions/<id>/join` подписанным токеном, поэтому слаг
+    комнаты (`room`) можно показывать публично: без токена он бесполезен.
+    """
+
+    __tablename__ = "conference_sessions"
+    __table_args__ = (
+        CheckConstraint(
+            "status = ANY (ARRAY['scheduled'::text, 'cancelled'::text])",
+            name="conference_sessions_status_check",
+        ),
+    )
+
+    id = Column(BigInteger, Identity(always=True), primary_key=True)
+    issue_id = Column(
+        BigInteger, ForeignKey("issues.id", ondelete="CASCADE"), nullable=False
+    )
+    # Секция-«зал»; null — общая сессия сборника (пленарная, открытие).
+    section_id = Column(
+        BigInteger,
+        ForeignKey("conference_sections.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    title = Column(Text, nullable=False)
+    starts_at = Column(DateTime(timezone=True), nullable=False)
+    ends_at = Column(DateTime(timezone=True), nullable=True)
+    # Слаг комнаты на meet.researcher.uz — генерируется, руками не задаётся.
+    room = Column(Text, nullable=False, unique=True)
+    status = Column(Text, nullable=False, server_default=text("'scheduled'::text"))
+    created_by = Column(UUID(as_uuid=True), ForeignKey("profiles.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    issue = relationship("Issue")
+    section = relationship("ConferenceSection")
+
+
 # ---------------------------------------------------------------------------
 # Иерархия контента: journals -> issues -> articles
 # ---------------------------------------------------------------------------
