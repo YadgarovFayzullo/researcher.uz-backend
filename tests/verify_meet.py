@@ -198,6 +198,7 @@ async def main():
             check("token.role", payload["role"], "speaker")
             check("token.sid", payload["sid"], live.id)
             check("token.type", payload["type"], "meet")
+            check("token.title", payload["title"], "Секция идёт")
             check("token.name", payload["name"], profiles["speaker"].full_name)
             check("token.sub", payload["sub"], str(users["speaker"].id))
             hours = (exp - now).total_seconds() / 3600

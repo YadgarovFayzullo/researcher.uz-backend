@@ -92,7 +92,13 @@ def display_name(profile: Profile) -> str:
 
 
 def make_meet_token(
-    *, profile_id, name: str, room: str, role: MeetRole, session_id: int
+    *,
+    profile_id,
+    name: str,
+    room: str,
+    role: MeetRole,
+    session_id: int,
+    title: str | None = None,
 ) -> tuple[str, dt.datetime]:
     """JWT для воркера комнаты. Формат — контракт с meet/app/utils/meetToken.server.ts."""
     if not settings.MEET_JWT_SECRET:
@@ -105,6 +111,8 @@ def make_meet_token(
         "room": room,
         "role": role,
         "sid": session_id,
+        # Заголовок сессии для шапки комнаты; воркер своей базы не имеет.
+        "title": (title or "")[:200],
         "type": "meet",
         "iat": now,
         "exp": exp,
@@ -221,5 +229,6 @@ class MeetDomain:
             room=session.room,
             role=role,
             session_id=session.id,
+            title=session.title,
         )
         return join_url(token), role, exp
