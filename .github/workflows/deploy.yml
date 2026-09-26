@@ -37,10 +37,31 @@ jobs:
             ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes deploy@${{ secrets.SERVER_HOST }} \
             'cat > /opt/apps/backend/.env && chmod 600 /opt/apps/backend/.env'
 
+      # Переменные комнаты онлайн-сессий живут отдельными секретами: .env выше
+      # переписывается целиком из BACKEND_ENV_PRODUCTION, и дописанное на
+      # сервере руками пропадало бы при каждом деплое. Секрет общий с воркером
+      # meet.researcher.uz (MEET_JWT_SECRET там — wrangler secret).
+      - name: Append meet env
+        if: ${{ secrets.MEET_JWT_SECRET != '' }}
+        run: |
+          printf 'MEET_BASE_URL=%s\nMEET_JWT_SECRET=%s\n' \
+            "${{ secrets.MEET_BASE_URL }}" "${{ secrets.MEET_JWT_SECRET }}" | \
+            ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes deploy@${{ secrets.SERVER_HOST }} \
+            'cat >> /opt/apps/backend/.env'
+
       - name: Build and restart API container
         run: |
           ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes deploy@${{ secrets.SERVER_HOST }} '
             cd /opt/apps/backend &&
             docker compose -f docker-compose.prod.yml up -d --build api &&
             docker compose -f docker-compose.prod.yml ps
+          '
+
+      # Миграции — после подъёма контейнера, одной разовой командой (в compose
+      # RUN_MIGRATIONS не включён: при нескольких репликах он дал бы гонку).
+      - name: Run migrations
+        run: |
+          ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes deploy@${{ secrets.SERVER_HOST }} '
+            cd /opt/apps/backend &&
+            docker compose -f docker-compose.prod.yml exec -T api alembic upgrade head
           '
