@@ -7,10 +7,12 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.deps import get_current_profile
+from src.api.deps import get_current_profile, get_optional_profile
+from src.core.ratelimit import limiter
+from src.core.turnstile import require_human
 from src.domain.authz import can_write_issue
 from src.domain.issue import IssueDomain
 from fastapi.concurrency import run_in_threadpool
@@ -24,6 +26,9 @@ from src.schemas.meet import (
     ConferenceSessionPublic,
     ConferenceSessionUpdate,
     JoinResponse,
+    GuestJoinRequest,
+    InviteInfo,
+    InviteLink,
     RecordingAttach,
     RecordingUploadRequest,
     RecordingUploadResponse,
@@ -51,6 +56,47 @@ async def _get_or_404(db: AsyncSession, session_id: int) -> ConferenceSession:
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
+
+
+# ------------------------------------------------------- прямая ссылка
+# /uz/live/<code>: с аккаунтом входим по роли, без аккаунта — гостем через зал
+# ожидания. Объявлены раньше /{session_id}, иначе "invite" разобрался бы как id.
+
+
+@router.get("/invite/{code}", response_model=InviteInfo)
+async def invite_info(code: str, db: AsyncSession = Depends(get_db)):
+    session = await domain.by_invite_code(db, code)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return InviteInfo(**await domain.invite_info(db, session))
+
+
+@router.post("/invite/{code}/join", response_model=JoinResponse)
+@limiter.limit("20/minute")
+async def invite_join(
+    request: Request,
+    code: str,
+    data: GuestJoinRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile | None = Depends(get_optional_profile),
+):
+    session = await domain.by_invite_code(db, code)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        if profile is not None:
+            url, role, exp = await domain.join(db, profile, session)
+        else:
+            # Гостю — капча (когда включена): ссылка публичная, а комната живая.
+            await require_human(request)
+            url, role, exp = domain.guest_join(session, data.name if data else None)
+    except SessionClosed as e:
+        raise HTTPException(
+            status_code=409, detail={"code": "session_closed", "reason": e.reason}
+        )
+    except MeetDisabled:
+        raise HTTPException(status_code=503, detail="Meet is not configured")
+    return JoinResponse(url=url, role=role, expires_at=exp)
 
 
 @router.get("/", response_model=list[ConferenceSessionPublic])
@@ -97,6 +143,18 @@ async def delete_session(
     session = await _get_or_404(db, session_id)
     await _guard_issue(db, profile, session.issue_id)
     await domain.delete_session(db, session)
+
+
+@router.get("/{session_id}/invite", response_model=InviteLink)
+async def invite_link(
+    session_id: int,
+    db: AsyncSession = Depends(get_db),
+    profile: Profile = Depends(get_current_profile),
+):
+    """Прямая ссылка — организатору, чтобы раздать участникам."""
+    session = await _get_or_404(db, session_id)
+    await _guard_issue(db, profile, session.issue_id)
+    return InviteLink(code=session.invite_code, url=domain.invite_url(session))
 
 
 @router.post("/{session_id}/join", response_model=JoinResponse)

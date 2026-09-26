@@ -71,3 +71,28 @@ class RecordingAttach(BaseModel):
     """После PUT в R2 фронт сообщает ключ; сервер сверяет, что объект есть."""
 
     key: str = Field(min_length=1, max_length=300)
+
+
+class InviteInfo(BaseModel):
+    """Публичная карточка прямой ссылки: что за сессия и когда."""
+
+    id: int
+    title: str
+    starts_at: datetime.datetime
+    ends_at: datetime.datetime | None = None
+    status: SessionStatus
+    issue_id: int
+    event_title: str | None = None
+    series_name: str | None = None
+    series_slug: str | None = None
+
+
+class InviteLink(BaseModel):
+    code: str
+    url: str
+
+
+class GuestJoinRequest(BaseModel):
+    """Гость без аккаунта: только имя. С аккаунтом тело не нужно."""
+
+    name: str | None = Field(default=None, max_length=60)

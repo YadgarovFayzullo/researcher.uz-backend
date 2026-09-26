@@ -282,6 +282,10 @@ class ConferenceSession(Base):
     recording_url = Column(Text, nullable=True)
     recording_size = Column(BigInteger, nullable=True)
     recording_uploaded_at = Column(DateTime(timezone=True), nullable=True)
+    # Код прямой ссылки /uz/live/<code>: с аккаунтом входят сразу, без него —
+    # гостем через зал ожидания. Не секрет комнаты (вход всё равно по токену),
+    # но в публичном списке сессий не отдаётся, чтобы ссылку раздавал организатор.
+    invite_code = Column(Text, nullable=False, unique=True)
 
     issue = relationship("Issue")
     section = relationship("ConferenceSection")

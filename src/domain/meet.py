@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import datetime as dt
 import secrets
+import uuid
 
 import jwt
 from sqlalchemy import select
@@ -58,6 +59,10 @@ class SessionClosed(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+def new_invite_code() -> str:
+    return secrets.token_urlsafe(9)[:12].replace("-", "x").replace("_", "y")
 
 
 def new_room_slug(issue_id: int) -> str:
@@ -173,6 +178,7 @@ class MeetDomain:
         session = ConferenceSession(
             **data.model_dump(),
             room=new_room_slug(data.issue_id),
+            invite_code=new_invite_code(),
             created_by=created_by,
         )
         db.add(session)
@@ -217,18 +223,67 @@ class MeetDomain:
             return "speaker"
         return "participant"
 
+    @staticmethod
+    def invite_url(session: ConferenceSession) -> str:
+        """Прямая ссылка на комнату — её и раздаёт организатор."""
+        base = (settings.FRONTEND_URL or "https://researcher.uz").rstrip("/")
+        return f"{base}/uz/live/{session.invite_code}"
+
     async def event_link(self, db: AsyncSession, session: ConferenceSession) -> str | None:
-        """Публичный адрес сборника (канонический /uz/...), откуда участники входят."""
+        """Ссылка для «Поделиться» в комнате: прямая ссылка на сессию."""
+        return self.invite_url(session)
+
+    async def by_invite_code(
+        self, db: AsyncSession, code: str
+    ) -> ConferenceSession | None:
+        if not code or len(code) > 32:
+            return None
         res = await db.execute(
-            select(Journal.slug)
-            .join(Issue, Issue.journal_id == Journal.id)
+            select(ConferenceSession).where(ConferenceSession.invite_code == code)
+        )
+        return res.scalars().first()
+
+    async def invite_info(self, db: AsyncSession, session: ConferenceSession) -> dict:
+        res = await db.execute(
+            select(Issue.title, Issue.year, Journal.name, Journal.slug)
+            .join(Journal, Journal.id == Issue.journal_id)
             .where(Issue.id == session.issue_id)
         )
-        slug = res.scalar_one_or_none()
-        if not slug:
-            return None
-        base = (settings.FRONTEND_URL or "https://researcher.uz").rstrip("/")
-        return f"{base}/uz/conference/{slug}/{session.issue_id}"
+        row = res.first()
+        return dict(
+            id=session.id,
+            title=session.title,
+            starts_at=session.starts_at,
+            ends_at=session.ends_at,
+            status=session.status,
+            issue_id=session.issue_id,
+            event_title=(row[0] or (f"{row[2]} {row[1]}" if row and row[1] else None)) if row else None,
+            series_name=row[2] if row else None,
+            series_slug=row[3] if row else None,
+        )
+
+    def guest_join(
+        self, session: ConferenceSession, name: str | None
+    ) -> tuple[str, MeetRole, dt.datetime]:
+        """Гость без аккаунта — всегда participant, то есть через зал ожидания.
+        Имя берём из формы; sub вида guest:<uuid>, чтобы воркер различал людей."""
+        if session.status != "scheduled":
+            raise SessionClosed("cancelled")
+        if not is_open_for(session, "participant"):
+            now = dt.datetime.now(dt.timezone.utc)
+            opens, _ = session_window(session)
+            raise SessionClosed("not_started" if now < opens else "ended")
+        clean = " ".join((name or "").split())[:60] or "Гость"
+        token, exp = make_meet_token(
+            profile_id=f"guest:{uuid.uuid4()}",
+            name=clean,
+            room=session.room,
+            role="participant",
+            session_id=session.id,
+            title=session.title,
+            link=self.invite_url(session),
+        )
+        return join_url(token), "participant", exp
 
     def recording_key(self, session: ConferenceSession, filename: str) -> str:
         ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "webm"
