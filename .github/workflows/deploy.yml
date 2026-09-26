@@ -42,10 +42,14 @@ jobs:
       # сервере руками пропадало бы при каждом деплое. Секрет общий с воркером
       # meet.researcher.uz (MEET_JWT_SECRET там — wrangler secret).
       - name: Append meet env
-        if: ${{ secrets.MEET_JWT_SECRET != '' }}
+        env:
+          MEET_BASE_URL: ${{ secrets.MEET_BASE_URL }}
+          MEET_JWT_SECRET: ${{ secrets.MEET_JWT_SECRET }}
         run: |
+          # secrets в `if:` шага GitHub не принимает — проверяем в shell.
+          if [ -z "$MEET_JWT_SECRET" ]; then echo "MEET_JWT_SECRET не задан — пропускаю"; exit 0; fi
           printf 'MEET_BASE_URL=%s\nMEET_JWT_SECRET=%s\n' \
-            "${{ secrets.MEET_BASE_URL }}" "${{ secrets.MEET_JWT_SECRET }}" | \
+            "${MEET_BASE_URL:-https://meet.researcher.uz}" "$MEET_JWT_SECRET" | \
             ssh -i ~/.ssh/deploy_key -o IdentitiesOnly=yes deploy@${{ secrets.SERVER_HOST }} \
             'cat >> /opt/apps/backend/.env'
 
